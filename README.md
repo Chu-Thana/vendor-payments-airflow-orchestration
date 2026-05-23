@@ -58,43 +58,27 @@ Kafka → Staging → Airflow Orchestration → Transform / Dedup → S3 (Silver
 
 ---
 
-## 🏗 Architecture Overview
+## 🧭 Architecture Overview
 
-This architecture demonstrates a **unified data platform** where batch and streaming pipelines are orchestrated centrally using Airflow.
+This project demonstrates a **unified data pipeline orchestration layer** where both batch and streaming workflows are centrally managed using Apache Airflow.
 
-👉 Airflow acts as the **control layer**, coordinating ingestion, transformation, and loading across all systems
+Airflow acts as the **control layer** for coordinating batch input, Kafka streaming staging, validation, cleansing, downstream deduplication, retry handling, monitoring, and publishing to analytics-ready layers.
 
-```mermaid
-flowchart LR
+![Airflow Batch and Streaming Orchestration](assets/00_airflow-batch-streaming-orchestration.png)
 
-subgraph Batch["Batch Pipeline"]
-    CSV["CSV Source"] --> S3Raw["S3 Raw"]
-    S3Raw --> AirflowBatch["Airflow Batch"]
-    AirflowBatch --> BatchTransform["Transform / Validate"]
-end
+**Design principle:** Airflow orchestrates batch and streaming workflows with validation, deduplication, retry handling, and monitoring before publishing data to the Silver and Gold layers.
 
-subgraph Streaming["Streaming Pipeline"]
-    Producer["Producer"] --> Kafka["Kafka"]
-    Kafka --> Consumer["Consumer"]
-    Consumer --> Staging["Staging"]
-    Staging --> AirflowStream["Airflow Stream"]
-    AirflowStream --> StreamTransform["Transform / Dedup"]
-end
+### Key Responsibilities of Airflow in This Project
 
-subgraph Storage["Storage Layer"]
-    BatchTransform --> Silver["S3 Silver"]
-    StreamTransform --> Silver
-    Silver --> Gold["S3 Gold"]
-    Gold --> Redshift["Redshift"]
-end
+- Orchestrates both **batch** and **streaming** workflows
+- Manages DAG-based task dependencies
+- Performs validation and cleansing before publishing downstream data
+- Applies downstream deduplication to improve analytics consistency
+- Supports scheduling, retry handling, logging, and monitoring
+- Publishes validated and deduplicated data into Silver and Gold layers
+- Enables downstream analytics through Athena on the S3 Gold Layer
 
-subgraph Serving["Serving Layer"]
-    Redshift --> API["API"]
-    Redshift --> BI["BI / Analytics"]
-end
-```
-
-👉 Batch + Streaming pipelines are unified into a single data model
+👉 **Batch and streaming pipelines are unified into a single orchestration workflow for downstream analytics.**
 
 ---
 
