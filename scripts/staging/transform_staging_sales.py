@@ -87,6 +87,10 @@ def transform_staging_sales() -> str:
 
     final_count = len(df)
 
+    remaining_duplicates = df["event_id"].duplicated().sum()
+    if remaining_duplicates > 0:
+        raise ValueError(f"Final duplicate check failed: {remaining_duplicates} duplicates remain")
+
     logger.info(f"Raw rows before cleaning: {raw_count}")
     logger.info(f"Invalid rows dropped: {invalid_dropped}")
     logger.info(f"Duplicates dropped by Kafka flag: {flagged_duplicate_dropped}")
