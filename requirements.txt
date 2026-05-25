@@ -2,3 +2,6 @@ pandas
 requests
 pyarrow
 psycopg2-binary
+apache-airflow
+pytest
+ruff
