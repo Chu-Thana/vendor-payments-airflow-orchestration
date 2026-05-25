@@ -9,6 +9,9 @@
 ![Query](https://img.shields.io/badge/Query-Athena-blue)
 ![Format](https://img.shields.io/badge/Format-JSONL-lightgrey)
 ![Container](https://img.shields.io/badge/Container-Docker-blue)
+![CI](https://github.com/Chu-Thana/superstore-airflow-orchestration/actions/workflows/ci.yml/badge.svg)
+![Testing](https://img.shields.io/badge/Testing-pytest-0A9EDC?logo=pytest&logoColor=white)
+![Code Quality](https://img.shields.io/badge/Code%20Quality-Ruff-8A2BE2)
 
 ---
 
@@ -21,6 +24,23 @@ Production-style data orchestration system using Apache Airflow to unify batch a
 - Handles at-least-once streaming with downstream deduplication  
 
 👉 Airflow acts as the **central control layer of a modern data platform**
+
+---
+
+## ⚙️ CI Validation
+
+![Project 4 Airflow DAG Validation CI](assets/cicd/project4-airflow-dag-validation-ci-success.png)
+
+This project includes a GitHub Actions CI workflow that runs automatically on every push to the `main` branch.
+
+The CI pipeline validates:
+
+- Code quality with Ruff
+- Airflow DAG import validation
+- Missing Python dependencies used by DAGs
+- Airflow version compatibility issues before scheduler deployment
+
+👉 This helps prevent broken DAGs, missing dependencies, and orchestration failures before workflows are deployed to the scheduler.
 
 ---
 
