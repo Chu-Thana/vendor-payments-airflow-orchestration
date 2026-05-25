@@ -20,7 +20,7 @@ with DAG(
     default_args=default_args,
     description="Read Kafka consumer staging file and build warehouse-ready summary",
     start_date=datetime(2026, 4, 14),
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["streaming", "staging", "warehouse"],
     on_success_callback=notify_success,
