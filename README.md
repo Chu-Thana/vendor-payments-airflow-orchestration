@@ -9,7 +9,7 @@
 ![Query](https://img.shields.io/badge/Query-Athena-blue)
 ![Format](https://img.shields.io/badge/Format-JSONL-lightgrey)
 ![Container](https://img.shields.io/badge/Container-Docker-blue)
-![CI](https://github.com/Chu-Thana/superstore-airflow-orchestration/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Chu-Thana/vendor-payments-airflow-orchestration/actions/workflows/ci.yml/badge.svg)
 ![Testing](https://img.shields.io/badge/Testing-pytest-0A9EDC?logo=pytest&logoColor=white)
 ![Code Quality](https://img.shields.io/badge/Code%20Quality-Ruff-8A2BE2)
 
