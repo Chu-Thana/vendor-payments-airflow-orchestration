@@ -50,7 +50,7 @@ def test_vendor_payments_dag_has_expected_tasks():
         include_examples=False,
     )
 
-    dag = dag_bag.get_dag("vendor_payments_etl_orchestration")
+    dag = dag_bag.dags.get("vendor_payments_etl_orchestration")
 
     assert dag is not None, "vendor_payments_etl_orchestration DAG was not loaded"
 
@@ -89,7 +89,7 @@ def test_vendor_payments_dag_task_dependencies():
         include_examples=False,
     )
 
-    dag = dag_bag.get_dag("vendor_payments_etl_orchestration")
+    dag = dag_bag.dags.get("vendor_payments_etl_orchestration")
 
     assert dag is not None, "vendor_payments_etl_orchestration DAG was not loaded"
 
