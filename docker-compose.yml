@@ -30,7 +30,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      _PIP_ADDITIONAL_REQUIREMENTS: boto3
+      _PIP_ADDITIONAL_REQUIREMENTS: boto3 pytest
       PYTHONPATH: /opt/airflow:/opt/airflow/scripts
       AIRFLOW_DATA_PATH: /opt/airflow
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
@@ -41,9 +41,11 @@ services:
       - ./scripts:/opt/airflow/scripts
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./tests:/opt/airflow/tests
       - ~/.aws:/home/airflow/.aws
       - E:/dev/project3_streaming/output/staging:/opt/airflow/staging
       - ./data:/opt/airflow/data
+      - E:/dev/vendor-payments-etl-analytics:/opt/airflow/vendor-payments-etl-analytics
     command: >
       bash -c "
       airflow db migrate &&
