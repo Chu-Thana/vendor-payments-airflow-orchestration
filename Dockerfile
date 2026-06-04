@@ -1,5 +1,7 @@
-FROM apache/airflow:3.1.0
+FROM apache/airflow:2.10.5
 
 USER airflow
 
-RUN pip install --no-cache-dir pandas pyarrow
+COPY requirements.txt /requirements.txt
+
+RUN pip install --no-cache-dir -r /requirements.txt

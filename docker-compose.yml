@@ -19,7 +19,8 @@ services:
       retries: 5
 
   airflow-init:
-    image: apache/airflow:2.10.5
+    build: .
+    image: vendor-payments-airflow:latest
     env_file:
       - .env
     container_name: airflow-init
@@ -30,7 +31,6 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      _PIP_ADDITIONAL_REQUIREMENTS: boto3 pytest
       PYTHONPATH: /opt/airflow:/opt/airflow/scripts
       AIRFLOW_DATA_PATH: /opt/airflow
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
@@ -59,7 +59,8 @@ services:
       "
 
   airflow-webserver:
-    image: apache/airflow:2.10.5
+    build: .
+    image: vendor-payments-airflow:latest
     env_file:
       - .env
     container_name: airflow-webserver
@@ -77,7 +78,8 @@ services:
     command: webserver
 
   airflow-scheduler:
-    image: apache/airflow:2.10.5
+    build: .
+    image: vendor-payments-airflow:latest
     env_file:
       - .env
     container_name: airflow-scheduler
