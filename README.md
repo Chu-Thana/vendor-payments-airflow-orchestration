@@ -1,4 +1,4 @@
-# 🛠 Airflow Data Pipeline Orchestration
+# 🛠 Vendor Payments Airflow Orchestration
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![Orchestration](https://img.shields.io/badge/Orchestration-Airflow-orange)
@@ -17,13 +17,14 @@
 
 ## 📌 Summary
 
-Production-style data orchestration system using Apache Airflow to unify batch and streaming pipelines.
+This project uses Apache Airflow as an orchestration layer for the **Vendor Payments ETL & Analytics Pipeline** from Project 1.
 
-- Orchestrates end-to-end workflows across ingestion → transformation → serving  
-- Ensures reliability with retries, monitoring, and alerting  
-- Handles at-least-once streaming with downstream deduplication  
+Instead of rewriting ETL logic, Airflow triggers the existing Project 1 pipeline, manages task dependencies, cleans previous sample outputs, validates generated Silver and Gold outputs, and provides retry, logging, and monitoring through the Airflow UI.
 
-👉 Airflow acts as the **central control layer of a modern data platform**
+The orchestration workflow demonstrates how a production-style batch ETL pipeline can be scheduled, monitored, and validated using Airflow.
+
+👉 Project 1 is the **batch ETL foundation**.  
+👉 Project 4 is the **Airflow orchestration layer**.
 
 ---
 
@@ -124,14 +125,21 @@ Airflow acts as the **control layer** for coordinating batch input, Kafka stream
 
 ## 🧩 DAG Structure
 
-This project contains multiple Airflow DAGs for different orchestration use cases:
+The main DAG in this refactored project is:
 
-- `project1_etl_runner.py` → orchestrates the original batch ETL workflow
-- `sales_etl_pipeline.py` → runs sales ETL processing tasks
-- `streaming_staging_pipeline.py` → processes Kafka staging data with downstream transformation and deduplication
-- `redshift_mart_pipeline.py` → builds / updates Redshift mart tables for analytics
+- `vendor_payments_etl_orchestration`  
+  Orchestrates the Vendor Payments ETL & Analytics Pipeline from Project 1.
 
-👉 These DAGs show that Airflow is used as a central orchestration layer, not just a single-task scheduler.
+Current orchestration flow:
+
+```text
+start
+  → check_project1_source
+  → clean_previous_outputs
+  → run_vendor_payments_pipeline
+  → check_silver_output
+  → check_gold_outputs
+  → end
 
 ---
 
