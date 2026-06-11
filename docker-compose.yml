@@ -43,9 +43,10 @@ services:
       - ./plugins:/opt/airflow/plugins
       - ./tests:/opt/airflow/tests
       - ~/.aws:/home/airflow/.aws
-      - E:/dev/project3_streaming/output/staging:/opt/airflow/staging
       - ./data:/opt/airflow/data
-      - E:/dev/vendor-payments-etl-analytics:/opt/airflow/vendor-payments-etl-analytics
+      - ./output:/opt/airflow/output
+      - E:/dev/vendor-payments-etl-analytics:/opt/airflow/project1
+      - E:/dev/vendor-payments-streaming-pipeline:/opt/airflow/project3
     command: >
       bash -c "
       airflow db migrate &&
