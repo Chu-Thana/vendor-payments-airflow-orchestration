@@ -25,3 +25,5 @@ data/*
 # But allow folder structure
 !data/.gitkeep
 
+# Airflow runtime outputs
+output/reports/
