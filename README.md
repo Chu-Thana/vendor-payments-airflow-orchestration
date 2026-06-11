@@ -340,51 +340,47 @@ test_vendor_payments_dag_task_dependencies
 
 ---
 
-## 📸 Evidence
-
-### 1. Airflow Orchestration Architecture
-
-![Airflow Orchestration Architecture](assets/vendor-payments-orchestration/final-orchestration/00_airflow_orchestration_architecture.png)
+## 📸 Execution Evidence
 
 ---
 
-### 2. Airflow DAG List
+### 1. Airflow DAG List
 
 ![Airflow DAG List](assets/vendor-payments-orchestration/final-orchestration/01_airflow_dag_list.png)
 
 ---
 
-### 3. DAG Triggered from CLI
+### 2. DAG Triggered from CLI
 
 ![Airflow DAG Triggered from CLI](assets/vendor-payments-orchestration/final-orchestration/02_airflow_dag_triggered_from_cli.png)
 
 ---
 
-### 4. DAG Graph View
+### 3. DAG Graph View
 
 ![Airflow DAG Graph View](assets/vendor-payments-orchestration/final-orchestration/03_airflow_dag_graph_view.png)
 
 ---
 
-### 5. Successful Run Grid
+### 4. Successful Run Grid
 
 ![Airflow Successful Run Grid](assets/vendor-payments-orchestration/final-orchestration/04_airflow_successful_run_grid.png)
 
 ---
 
-### 6. Downstream Deduplication Task Logs
+### 5. Downstream Deduplication Task Logs
 
 ![Airflow Downstream Deduplication Task Logs](assets/vendor-payments-orchestration/final-orchestration/05_airflow_downstream_dedup_task_logs.png)
 
 ---
 
-### 7. Orchestration Summary Report
+### 6. Orchestration Summary Report
 
 ![Airflow Orchestration Summary Report](assets/vendor-payments-orchestration/final-orchestration/06_orchestration_summary_report.png)
 
 ---
 
-### 8. Ruff and Pytest Passed
+### 7. Code Quality and DAG Tests
 
 ![Ruff and Pytest Passed](assets/vendor-payments-orchestration/final-orchestration/07_ruff_and_pytest_passed.png)
 
