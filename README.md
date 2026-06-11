@@ -3,247 +3,426 @@
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![Orchestration](https://img.shields.io/badge/Orchestration-Airflow-orange)
 ![Streaming](https://img.shields.io/badge/Streaming-Kafka-purple)
-![Cloud](https://img.shields.io/badge/Cloud-AWS-yellow)
-![Data Lake](https://img.shields.io/badge/Data_Lake-S3-lightgrey)
-![Warehouse](https://img.shields.io/badge/Warehouse-Redshift-red)
-![Query](https://img.shields.io/badge/Query-Athena-blue)
 ![Format](https://img.shields.io/badge/Format-JSONL-lightgrey)
 ![Container](https://img.shields.io/badge/Container-Docker-blue)
-![CI](https://github.com/Chu-Thana/vendor-payments-airflow-orchestration/actions/workflows/ci.yml/badge.svg)
-![Testing](https://img.shields.io/badge/Testing-pytest-0A9EDC?logo=pytest&logoColor=white)
+![Testing](https://img.shields.io/badge/Testing-pytest-0A9EDC?logo=pytest\&logoColor=white)
 ![Code Quality](https://img.shields.io/badge/Code%20Quality-Ruff-8A2BE2)
+![CI](https://github.com/Chu-Thana/vendor-payments-airflow-orchestration/actions/workflows/ci.yml/badge.svg)
 
 ---
 
 ## 📌 Summary
 
-This project uses Apache Airflow as an orchestration layer for the **Vendor Payments ETL & Analytics Pipeline** from Project 1.
+This project uses **Apache Airflow** as the orchestration layer for the Vendor Payments data platform.
 
-Instead of rewriting ETL logic, Airflow triggers the existing Project 1 pipeline, manages task dependencies, cleans previous sample outputs, validates generated Silver and Gold outputs, and provides retry, logging, and monitoring through the Airflow UI.
+The main goal is to prove that the Vendor Payments pipeline is not only executable manually, but can also be:
 
-The orchestration workflow demonstrates how a production-style batch ETL pipeline can be scheduled, monitored, and validated using Airflow.
+* orchestrated
+* monitored
+* retried
+* validated
+* prepared for downstream analytics
 
-👉 Project 1 is the **batch ETL foundation**.  
-👉 Project 4 is the **Airflow orchestration layer**.
-
----
-
-## ⚙️ CI Validation
-
-![Project 4 Airflow DAG Validation CI](assets/cicd/project4-airflow-dag-validation-ci-success.png)
-
-This project includes a GitHub Actions CI workflow that runs automatically on every push to the `main` branch.
-
-The CI pipeline validates:
-
-- Code quality with Ruff
-- Airflow DAG import validation
-- Missing Python dependencies used by DAGs
-- Airflow version compatibility issues before scheduler deployment
-
-👉 This helps prevent broken DAGs, missing dependencies, and orchestration failures before workflows are deployed to the scheduler.
-
----
-
-## 📊 Orchestration Metrics
-
-- Orchestrated **4 production-style DAGs (11+ tasks)** across batch and streaming pipelines  
-- Achieved **100% successful pipeline runs** with retry and alerting mechanisms  
-- Implemented **automatic retry recovery (3 tasks, 2 retries)** for fault tolerance  
-- Enabled **real-time alerting (success + failure)** for full observability  
-- Reduced manual pipeline execution by **~64% (11 → 4 steps)** via automation  
-
-👉 Metrics collected from controlled validation runs simulating production scenarios
-
----
-
-## 🔗 Integration with Data Platform
-
-This project sits at the **center of the data platform**:
-
-- Project 1 → batch ETL and data modeling (analytics-ready datasets)
-- Project 2 → API serving layer for data consumption
-- Project 3 → real-time streaming ingestion (Kafka)
-- Project 4 → orchestration, transformation, and deduplication (this project)
-- Project 5 → cloud storage and warehouse (S3 / Redshift / Athena)
-
-👉 Airflow acts as the **central orchestration layer connecting all components**
-
----
-
-## 🔄 Data Flow
-
-Kafka → Staging → Airflow Orchestration → Transform / Dedup → S3 (Silver/Gold) → Redshift / Athena → API / BI
-
-👉 End-to-end **data pipeline orchestration with unified batch + streaming architecture**
+Airflow orchestrates the Project 1 batch ETL pipeline, validates generated Silver and Gold outputs, checks Project 3 streaming staging output, runs downstream deduplication validation, and writes an orchestration summary report.
 
 ---
 
 ## 🧭 Architecture Overview
 
-This project demonstrates a **unified data pipeline orchestration layer** where both batch and streaming workflows are centrally managed using Apache Airflow.
+![Vendor Payments Airflow Orchestration Pipeline](assets/vendor-payments-orchestration/final-orchestration/00_airflow_orchestration_architecture.png)
 
-Airflow acts as the **control layer** for coordinating batch input, Kafka streaming staging, validation, cleansing, downstream deduplication, retry handling, monitoring, and publishing to analytics-ready layers.
+This orchestration project connects two parts of the Vendor Payments platform:
 
-![Airflow Batch and Streaming Orchestration](assets/00_airflow-batch-streaming-orchestration.png)
+* **Batch Pipeline Foundation**
+  Runs the batch ETL pipeline and validates Silver / Gold outputs.
 
-**Design principle:** Airflow orchestrates batch and streaming workflows with validation, deduplication, retry handling, and monitoring before publishing data to the Silver and Gold layers.
+* **Streaming Staging Layer**
+  Checks the JSONL staging output generated by the Kafka streaming pipeline.
 
-### Key Responsibilities of Airflow in This Project
+Airflow does not rerun Kafka producer or consumer jobs in this project.
+Instead, it treats the streaming staging file as a downstream input for validation and duplicate checking.
 
-- Orchestrates both **batch** and **streaming** workflows
-- Manages DAG-based task dependencies
-- Performs validation and cleansing before publishing downstream data
-- Applies downstream deduplication to improve analytics consistency
-- Supports scheduling, retry handling, logging, and monitoring
-- Publishes validated and deduplicated data into Silver and Gold layers
-- Enables downstream analytics through Athena on the S3 Gold Layer
-
-👉 **Batch and streaming pipelines are unified into a single orchestration workflow for downstream analytics.**
+**Design principle:**
+Orchestrate reliably, validate curated outputs, and handle downstream duplicates safely before analytics.
 
 ---
 
-## ⚙️ Pipeline Flow
+## 🔗 Project Integration
 
-### 1️⃣ Extract (Staging Layer)
-- Airflow reads streaming output from Kafka staging (JSONL / S3)
-- Batch data is ingested from raw layer
-- Schema is validated and normalized
+This project connects with the broader Vendor Payments data platform:
 
-### 2️⃣ Transform (Processing Layer)
-- Airflow executes modular DAG tasks with dependency management  
-- Data is cleaned and validated
-- Deduplication is applied (downstream of Kafka at-least-once delivery)
-- Business logic and aggregations are applied
+| Project   | Role                                                               |
+| --------- | ------------------------------------------------------------------ |
+| Project 1 | Batch ETL foundation that produces Silver and Gold outputs         |
+| Project 3 | Kafka streaming pipeline that writes JSONL staging output          |
+| Project 4 | Airflow orchestration, validation, and downstream deduplication    |
+| Project 5 | Cloud / S3 / Athena layer for publishing curated analytics outputs |
 
-### 3️⃣ Load (Storage & Serving Layer)
-- Cleaned data is written to S3 Silver layer
-- Aggregated data is promoted to S3 Gold layer
-- Final datasets are loaded into Redshift for analytics
+The batch pipeline originally followed this path:
+
+```text
+Project 1 → Project 4 → Project 5
+```
+
+After completing the streaming pipeline, Project 4 was extended to include downstream validation for Project 3 staging data:
+
+```text
+Project 3 Streaming Output → Project 4 Downstream Validation
+```
 
 ---
 
-## 🧩 DAG Structure
+## ⚙️ DAG Structure
 
-The main DAG in this refactored project is:
+Main DAG:
 
-- `vendor_payments_etl_orchestration`  
-  Orchestrates the Vendor Payments ETL & Analytics Pipeline from Project 1.
+```text
+vendor_payments_batch_orchestration
+```
 
-Current orchestration flow:
+DAG file:
+
+```text
+dags/vendor_payments_etl_orchestration.py
+```
+
+Main task flow:
 
 ```text
 start
-  → check_project1_source
-  → clean_previous_outputs
-  → run_vendor_payments_pipeline
-  → check_silver_output
-  → check_gold_outputs
+  → check_project1_ready
+  → run_project1_pipeline
+  → validate_silver_output
+  → validate_gold_outputs
+  → check_project3_streaming_staging
+  → run_downstream_deduplication_check
+  → generate_orchestration_summary
   → end
+```
 
 ---
 
-## 🔁 Deduplication Strategy
+## 🧩 What Each Task Does
 
-This system follows an **at-least-once delivery model**:
+### 1. `check_project1_ready`
 
-- Kafka ensures no data loss
-- Duplicate events may occur due to reprocessing or consumer retries
+Checks that the Project 1 repository is mounted correctly inside the Airflow container and that the main pipeline script exists.
 
-### Design Decision
+Expected Project 1 path inside Airflow:
 
-Deduplication is intentionally handled **downstream in Airflow**, not in the consumer layer.
+```text
+/opt/airflow/project1
+```
 
-👉 Reason:
+Expected pipeline script:
 
-- Avoids data loss in case of consumer failure
-- Keeps the streaming layer lightweight and stateless
-- Ensures correctness is enforced in a controlled batch processing environment
-
-### Approach
-
-- Use `event_id` as a unique identifier
-- Deduplicate records during transformation (Airflow DAG)
-
-### Guarantees
-
-- No data loss (streaming ingestion layer)
-- Data correctness (processing / warehouse layer)
-
-👉 This reflects a real-world trade-off:  
-**reliability first → correctness enforced downstream**
-👉 This design prioritizes **data reliability over processing simplicity**, a common pattern in real-world data platforms
+```text
+/opt/airflow/project1/scripts/pipeline/run_pipeline.py
+```
 
 ---
 
-## ⚡ Scalability Design
+### 2. `run_project1_pipeline`
 
-- Airflow breaks workflows into modular DAG tasks, enabling parallel execution  
-- Batch and streaming pipelines scale independently without coupling  
-- S3 acts as a decoupled storage layer (compute vs storage separation)  
-- Redshift scales analytical workloads independently from ingestion  
+Runs the Project 1 batch ETL pipeline from Airflow:
 
-👉 This architecture supports **horizontal scaling across ingestion, processing, and serving layers**
+```text
+python -m scripts.pipeline.run_pipeline
+```
 
----
-
-## 🚨 Reliability & Failure Handling
-
-- Kafka ensures **at-least-once delivery** (no data loss)  
-- Airflow manages **task dependencies, retries, and execution monitoring**  
-- Downstream deduplication guarantees data correctness despite duplicate events  
-- Pipelines are **fully recoverable** from raw → silver → gold layers  
-
-👉 Designed with **production-grade reliability, fault tolerance, and observability principles**
+This step rebuilds the Vendor Payments Silver and Gold outputs.
 
 ---
 
-## 📸 Execution Proof
+### 3. `validate_silver_output`
 
-### 1️⃣ Orchestration Overview
-![DAG](assets/01_orchestration_dag_overview.png)
+Validates that the Silver output exists and is not empty:
 
-### 2️⃣ DAG Execution Flow
-![Execution](assets/02_pipeline_dag_execution.png)
+```text
+/opt/airflow/project1/data/processed/silver/vendor_payments_silver.csv
+```
 
-### 3️⃣ Task Execution Logs
-![Logs](assets/03_task_execution_logs.png)
+Validation checks:
 
-### 4️⃣ Real-time Alert Monitoring
-![Alert](assets/04_real_time_alert_monitoring.png)
+* file exists
+* file size > 0
+* output is ready for downstream processing
 
-### 5️⃣ Data Lake Output (S3 Silver Layer)
-![S3](assets/05_data_lake_silver_output.png)
+---
 
-### 6️⃣ Pipeline Metrics Summary
-![Metrics](assets/06_pipeline_metrics_summary.png)
+### 4. `validate_gold_outputs`
 
-Pipeline reliability and automation metrics collected from Airflow validation runs  
-Demonstrates system stability, retry handling, and monitoring capabilities
-- 4 DAGs, 11+ tasks orchestrated across batch and streaming pipelines  
-- 100% validation success rate with retry and alerting  
-- ~64% reduction in manual execution steps via automation  
+Validates that Gold marts were generated successfully.
+
+Expected Gold output directory:
+
+```text
+/opt/airflow/project1/data/processed/gold
+```
+
+Validated marts include:
+
+```text
+mart_fund_category_summary.csv
+mart_pending_by_department.csv
+mart_spending_by_department.csv
+mart_spending_by_fiscal_year.csv
+mart_spending_by_supplier_top_n.csv
+```
+
+---
+
+### 5. `check_project3_streaming_staging`
+
+Checks that the Project 3 streaming staging output exists and contains data.
+
+Expected Project 3 staging file:
+
+```text
+/opt/airflow/project3/output/staging/vendor_payments_streaming_staging.jsonl
+```
+
+This file is produced by the Kafka streaming pipeline and used as downstream input for Airflow validation.
+
+---
+
+### 6. `run_downstream_deduplication_check`
+
+Reads the Project 3 JSONL staging file and performs a downstream duplicate check.
+
+The task validates:
+
+* total staging records
+* unique `event_id` count
+* duplicate `event_id` count
+* missing `event_id` count
+
+Final validated result from the controlled run:
+
+```text
+total_staging_records = 100000
+unique_event_ids = 100000
+duplicate_event_ids = 0
+missing_event_id = 0
+downstream_deduplication_status = passed
+```
+
+---
+
+### 7. `generate_orchestration_summary`
+
+Generates an orchestration summary report:
+
+```text
+/opt/airflow/output/reports/airflow_orchestration_summary.json
+```
+
+The report includes:
+
+* Project 1 pipeline status
+* Silver validation result
+* Gold validation result
+* Project 3 staging validation result
+* Downstream deduplication result
+* Overall orchestration status
+
+Runtime reports are ignored by Git because they are generated outputs.
+
+---
+
+## 🔁 Downstream Deduplication Strategy
+
+Project 3 follows an **at-least-once processing mindset**.
+
+The streaming pipeline prioritizes durable staging output before offset commit:
+
+```text
+read event
+→ validate event
+→ check duplicate
+→ write staging output
+→ mark Redis as processed
+→ commit Kafka offset
+```
+
+This design prioritizes:
+
+```text
+Prevent data loss first.
+Handle duplicates safely downstream.
+```
+
+Project 4 provides the downstream validation layer.
+
+Airflow checks the staged JSONL output and performs a second-level deduplication check using `event_id`.
+
+This ensures that even if replayed or duplicate events appear in downstream staging data, they can be detected before analytics outputs are trusted.
+
+---
+
+## 🐳 Docker Mounts
+
+Project 1 and Project 3 are mounted into the Airflow container so the DAG can orchestrate and validate both projects.
+
+Example Docker paths:
+
+```text
+/opt/airflow/project1
+/opt/airflow/project3
+/opt/airflow/output
+```
+
+The Airflow DAG uses Docker-compatible Linux paths instead of Windows paths.
+
+---
+
+## ▶️ How to Run Locally
+
+Start Airflow services:
+
+```powershell
+docker compose up -d
+```
+
+Check services:
+
+```powershell
+docker compose ps
+```
+
+Open Airflow UI:
+
+```text
+http://localhost:8080
+```
+
+Trigger DAG from CLI:
+
+```powershell
+docker compose exec airflow-webserver airflow dags unpause vendor_payments_batch_orchestration
+docker compose exec airflow-webserver airflow dags trigger vendor_payments_batch_orchestration
+```
+
+Check DAG runs:
+
+```powershell
+docker compose exec airflow-webserver airflow dags list-runs -d vendor_payments_batch_orchestration
+```
+
+---
+
+## ✅ Testing
+
+Run Ruff locally:
+
+```powershell
+python -m ruff check .
+```
+
+Run Airflow DAG tests inside the Airflow container:
+
+```powershell
+docker compose exec airflow-webserver python -m pytest -v /opt/airflow/tests
+```
+
+Why tests run inside the container:
+
+Airflow dependencies are installed in the Docker image, so DAG import tests should run in the same environment used by the Airflow webserver and scheduler.
+
+Validated tests:
+
+```text
+test_dag_folder_exists
+test_airflow_dags_import_without_errors
+test_vendor_payments_dag_has_expected_tasks
+test_vendor_payments_dag_task_dependencies
+```
+
+---
+
+## 📸 Evidence
+
+### 1. Airflow Orchestration Architecture
+
+![Airflow Orchestration Architecture](assets/vendor-payments-orchestration/final-orchestration/00_airflow_orchestration_architecture.png)
+
+---
+
+### 2. Airflow DAG List
+
+![Airflow DAG List](assets/vendor-payments-orchestration/final-orchestration/01_airflow_dag_list.png)
+
+---
+
+### 3. DAG Triggered from CLI
+
+![Airflow DAG Triggered from CLI](assets/vendor-payments-orchestration/final-orchestration/02_airflow_dag_triggered_from_cli.png)
+
+---
+
+### 4. DAG Graph View
+
+![Airflow DAG Graph View](assets/vendor-payments-orchestration/final-orchestration/03_airflow_dag_graph_view.png)
+
+---
+
+### 5. Successful Run Grid
+
+![Airflow Successful Run Grid](assets/vendor-payments-orchestration/final-orchestration/04_airflow_successful_run_grid.png)
+
+---
+
+### 6. Downstream Deduplication Task Logs
+
+![Airflow Downstream Deduplication Task Logs](assets/vendor-payments-orchestration/final-orchestration/05_airflow_downstream_dedup_task_logs.png)
+
+---
+
+### 7. Orchestration Summary Report
+
+![Airflow Orchestration Summary Report](assets/vendor-payments-orchestration/final-orchestration/06_orchestration_summary_report.png)
+
+---
+
+### 8. Ruff and Pytest Passed
+
+![Ruff and Pytest Passed](assets/vendor-payments-orchestration/final-orchestration/07_ruff_and_pytest_passed.png)
+
+---
+
+## 🗂 Earlier Batch Orchestration Evidence
+
+Before extending this project with streaming staging validation and downstream deduplication checks, the Airflow orchestration layer first validated the batch pipeline foundation.
+
+Earlier batch orchestration screenshots are stored in:
+
+```text
+assets/vendor-payments-orchestration/batch-foundation/
+```
+
+This keeps the project history while making the latest orchestration flow clear in the main README.
 
 ---
 
 ## 🧠 What This Project Demonstrates
 
-- Designing **production-ready orchestration systems** using Airflow  
-- Integrating **batch and real-time streaming pipelines** into a unified architecture  
-- Building systems with **fault tolerance, observability, and automated recovery**  
-- Applying **real-world data engineering patterns (at-least-once + downstream correction)**  
+This project demonstrates practical data engineering orchestration skills:
 
-👉 Demonstrates **end-to-end system thinking**, not just tool usage
+* Building Airflow DAGs for production-style workflows
+* Triggering an existing batch ETL project from Airflow
+* Validating Silver and Gold outputs after pipeline execution
+* Checking streaming staging data as downstream input
+* Applying second-level duplicate validation after Kafka ingestion
+* Generating an orchestration summary report
+* Running DAG integrity tests in an Airflow container
+* Managing evidence and project history cleanly
 
 ---
 
 ## 💡 Key Takeaway
 
-This project demonstrates how to design a **production-grade orchestration system**:
+A data pipeline should not only run manually.
 
-- Centralized control using Airflow  
-- Decoupled, scalable data architecture  
-- Reliability-first design with downstream correction  
-- Measurable impact through automation and monitoring  
+It should be orchestrated, monitored, retried, and validated.
 
-👉 Shows the ability to build **real-world data platforms**, not just pipelines
+This project shows how Airflow can act as the orchestration layer between batch ETL outputs and streaming staging data, while enforcing downstream validation before analytics.
