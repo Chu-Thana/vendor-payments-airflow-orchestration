@@ -342,7 +342,6 @@ test_vendor_payments_dag_task_dependencies
 
 ## 📸 Execution Evidence
 
----
 
 ### 1. Airflow DAG List
 
