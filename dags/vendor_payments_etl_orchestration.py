@@ -5,6 +5,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from airflow import DAG
 
@@ -77,9 +78,11 @@ def run_project1_pipeline() -> None:
     if result.returncode != 0:
         raise RuntimeError(
             "Project 1 pipeline failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
             f"STDOUT:\n{result.stdout}\n"
             f"STDERR:\n{result.stderr}"
         )
+
 
 
 def validate_silver_output() -> dict:
@@ -208,6 +211,227 @@ def check_project5_ready() -> dict:
         ),
         "project5_readiness_status": "passed",
     }
+
+
+def serialize_datetime(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    return value.isoformat()
+
+
+def enum_value(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    return str(getattr(value, "value", value))
+
+
+def build_airflow_execution_metadata(
+    context: dict[str, Any],
+    final_status: str,
+) -> dict[str, Any]:
+    dag_run = context.get("dag_run")
+
+    if dag_run is None:
+        raise ValueError(
+            "Airflow DAG run context is unavailable."
+        )
+
+    task_instances = dag_run.get_task_instances()
+
+    state_counts: dict[str, int] = {}
+    retry_attempt_count = 0
+    task_execution_details: list[dict[str, Any]] = []
+
+    for task_instance in task_instances:
+        task_state = enum_value(
+            task_instance.state
+        ) or "none"
+
+        state_counts[task_state] = (
+            state_counts.get(task_state, 0) + 1
+        )
+
+        try_number = int(
+            task_instance.try_number or 0
+        )
+        retries_for_task = max(
+            try_number - 1,
+            0,
+        )
+        retry_attempt_count += retries_for_task
+
+        task_execution_details.append(
+            {
+                "task_id": task_instance.task_id,
+                "state": task_state,
+                "try_number": try_number,
+                "retry_attempts": retries_for_task,
+                "started_at": serialize_datetime(
+                    task_instance.start_date
+                ),
+                "completed_at": serialize_datetime(
+                    task_instance.end_date
+                ),
+                "duration_seconds": task_instance.duration,
+            }
+        )
+
+    started_at = dag_run.start_date
+    completed_at = (
+        dag_run.end_date
+        or datetime.now(timezone.utc)
+    )
+
+    runtime_seconds = None
+
+    if started_at is not None:
+        runtime_seconds = round(
+            (
+                completed_at
+                - started_at
+            ).total_seconds(),
+            2,
+        )
+
+    return {
+        "execution": {
+            "dag_id": dag_run.dag_id,
+            "run_id": dag_run.run_id,
+            "run_type": enum_value(
+                dag_run.run_type
+            ),
+            "logical_date": serialize_datetime(
+                dag_run.logical_date
+            ),
+            "started_at": serialize_datetime(
+                started_at
+            ),
+            "completed_at": serialize_datetime(
+                completed_at
+            ),
+            "runtime_seconds": runtime_seconds,
+            "final_status": final_status,
+        },
+        "task_metrics": {
+            "total_task_count": len(task_instances),
+            "successful_task_count": state_counts.get(
+                "success",
+                0,
+            ),
+            "failed_task_count": state_counts.get(
+                "failed",
+                0,
+            ),
+            "skipped_task_count": state_counts.get(
+                "skipped",
+                0,
+            ),
+            "upstream_failed_task_count": state_counts.get(
+                "upstream_failed",
+                0,
+            ),
+            "up_for_retry_task_count": state_counts.get(
+                "up_for_retry",
+                0,
+            ),
+            "retry_attempt_count": retry_attempt_count,
+            "state_counts": state_counts,
+            "task_execution_details": (
+                task_execution_details
+            ),
+        },
+    }
+
+
+def finalize_orchestration_summary(
+    context: dict[str, Any],
+    final_status: str,
+) -> None:
+    ORCHESTRATION_SUMMARY.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    summary: dict[str, Any] = {}
+
+    if ORCHESTRATION_SUMMARY.exists():
+        with ORCHESTRATION_SUMMARY.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            summary = json.load(file)
+
+    execution_metadata = (
+        build_airflow_execution_metadata(
+            context=context,
+            final_status=final_status,
+        )
+    )
+
+    summary.setdefault(
+        "project",
+        "Vendor Payments Airflow Orchestration",
+    )
+    summary.setdefault(
+        "pipeline_version",
+        "1.0.0",
+    )
+
+    summary["finalized_at"] = datetime.now(
+        timezone.utc
+    ).isoformat()
+    summary["execution"] = execution_metadata[
+        "execution"
+    ]
+    summary["task_metrics"] = execution_metadata[
+        "task_metrics"
+    ]
+    summary["orchestration_status"] = final_status
+    summary["validation"] = {
+        "status": (
+            "PASS"
+            if final_status == "success"
+            else "FAIL"
+        )
+    }
+
+    temporary_file = ORCHESTRATION_SUMMARY.with_suffix(
+        ".json.tmp"
+    )
+
+    with temporary_file.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            summary,
+            file,
+            indent=2,
+        )
+
+    temporary_file.replace(
+        ORCHESTRATION_SUMMARY
+    )
+
+
+def finalize_successful_dag(
+    context: dict[str, Any],
+) -> None:
+    finalize_orchestration_summary(
+        context=context,
+        final_status="success",
+    )
+
+
+def finalize_failed_dag(
+    context: dict[str, Any],
+) -> None:
+    finalize_orchestration_summary(
+        context=context,
+        final_status="failed",
+    )
 
 
 def generate_redshift_execution_summary() -> dict:
@@ -450,6 +674,8 @@ with DAG(
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
+    on_success_callback=finalize_successful_dag,
+    on_failure_callback=finalize_failed_dag,
     tags=[
         "vendor-payments",
         "batch",

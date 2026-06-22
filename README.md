@@ -5,7 +5,7 @@
 ![Batch](https://img.shields.io/badge/Batch-ETL-2E86C1)
 ![Streaming](https://img.shields.io/badge/Streaming-Kafka-purple)
 ![Warehouse](https://img.shields.io/badge/Warehouse-Redshift-8C4FFF)
-![Testing](https://img.shields.io/badge/Testing-12%20Passed-0A9EDC?logo=pytest&logoColor=white)
+![Testing](https://img.shields.io/badge/Testing-17%20Passed-0A9EDC?logo=pytest&logoColor=white)
 ![Code Quality](https://img.shields.io/badge/Code%20Quality-Ruff-8A2BE2)
 ![Container](https://img.shields.io/badge/Container-Docker-2496ED?logo=docker&logoColor=white)
 ![CI](https://github.com/Chu-Thana/vendor-payments-airflow-orchestration/actions/workflows/ci.yml/badge.svg)
@@ -80,7 +80,7 @@ Airflow coordinates these dependencies, validates their outputs, and consolidate
 | Redshift Streaming landing tables | 1 |
 | Redshift Streaming events | 100,000 |
 | Redshift Streaming analytics views | 4 |
-| Automated tests | 12 passed |
+| Automated tests | 17 passed |
 | Ruff lint | Passed |
 | GitHub Actions CI | Passed |
 
@@ -280,13 +280,31 @@ Example top-level structure:
   "project": "Vendor Payments Airflow Orchestration",
   "pipeline_version": "1.0.0",
   "dag_id": "vendor_payments_data_platform_orchestration",
+  "generated_at": "2026-06-22T10:25:53.665269+00:00",
+  "finalized_at": "2026-06-22T17:11:15.432145+00:00",
   "batch_pipeline": {},
   "streaming_pipeline": {},
   "cloud_pipeline": {},
   "redshift_pipeline": {},
-  "orchestration_status": "completed",
+  "orchestration_status": "success",
   "validation": {
     "status": "PASS"
+  },
+  "execution": {
+    "run_id": "manual__2026-06-22T15:45:31+00:00",
+    "run_type": "manual",
+    "runtime_seconds": 2888.02,
+    "final_status": "success"
+  },
+  "task_metrics": {
+    "total_task_count": 12,
+    "successful_task_count": 12,
+    "failed_task_count": 0,
+    "retry_attempt_count": 3,
+    "state_counts": {
+      "success": 12
+    },
+    "task_execution_details": []
   }
 }
 ```
@@ -400,7 +418,7 @@ docker compose exec airflow-scheduler `
 Current result:
 
 ```text
-12 passed
+17 passed
 All checks passed!
 ```
 
@@ -422,6 +440,11 @@ The automated tests validate:
 - Missing-event detection
 - Incorrect analytics-view detection
 - Missing Redshift summary file handling
+- DAG execution metadata generation
+- Task-state aggregation
+- Retry-attempt counting
+- DAG runtime calculation
+- Final orchestration-summary metadata updates
 
 The unit tests use temporary JSON fixtures and monkeypatching, so CI does not connect to AWS or Redshift.
 
@@ -481,6 +504,36 @@ The graph view shows the complete dependency chain from Batch execution through 
 
 ![Airflow Orchestration Summary Report](assets/vendor-payments-orchestration/final-orchestration/07_orchestration_summary_report.png)
 
+### Airflow Execution Metadata
+
+![Airflow Execution Metadata Summary](assets/vendor-payments-orchestration/final-orchestration/08_airflow_execution_metadata_summary.png)
+
+The orchestration summary includes Airflow-native execution metadata for the completed DAG run.
+
+Captured metadata includes:
+
+* DAG run ID and run type
+* Logical, start, completion, and finalization timestamps
+* Total DAG runtime
+* Final DAG status
+* Successful, failed, skipped, and upstream-failed task counts
+* Retry-attempt count
+* Per-task state, timestamps, duration, and retry details
+
+Validated execution result:
+
+```text
+total_task_count = 12
+successful_task_count = 12
+failed_task_count = 0
+skipped_task_count = 0
+upstream_failed_task_count = 0
+final_status = success
+validation.status = PASS
+```
+
+The recorded retry count reflects the actual recovery history of the validated DAG run.
+
 ---
 
 ## 🗂️ Project Structure
@@ -509,6 +562,7 @@ vendor-payments-airflow-orchestration/
 │
 ├── scripts/
 ├── tests/
+│   ├── test_airflow_execution_metadata.py
 │   ├── test_dags.py
 │   └── test_redshift_metadata.py
 │
@@ -602,8 +656,6 @@ This project is the coordination and validation layer across the platform. It do
 
 ## 🛣️ Planned Development
 
-- Add richer DAG-run metadata such as task-state counts and per-task durations
-- Add retry and failure summaries to the orchestration report
 - Add Cloud upload and Athena readiness metadata where useful
 - Add alerting for failed orchestration runs
 - Add centralized observability and log aggregation
