@@ -7,8 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from airflow import DAG
-from airflow.operators.empty import EmptyOperator
-from airflow.operators.python import PythonOperator
+
+try:
+    from airflow.providers.standard.operators.empty import EmptyOperator
+    from airflow.providers.standard.operators.python import PythonOperator
+except ImportError:
+    from airflow.operators.empty import EmptyOperator
+    from airflow.operators.python import PythonOperator
 
 
 PROJECT1_ROOT = Path("/opt/airflow/project1")

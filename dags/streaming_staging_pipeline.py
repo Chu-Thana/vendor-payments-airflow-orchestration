@@ -1,11 +1,15 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator
 from scripts.notify import task_fail_alert, notify_success
 from scripts.staging.extract_staging_sales import extract_staging_sales
 from scripts.staging.transform_staging_sales import transform_staging_sales
 from scripts.staging.load_staging_sales_summary import load_staging_sales_summary
+
+try:
+    from airflow.providers.standard.operators.python import PythonOperator
+except ImportError:
+    from airflow.operators.python import PythonOperator
 
 default_args = {
     "owner": "admin",

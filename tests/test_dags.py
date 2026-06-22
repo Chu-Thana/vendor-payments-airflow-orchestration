@@ -107,7 +107,7 @@ def test_vendor_payments_dag_configuration() -> None:
 
     assert dag is not None, f"{DAG_ID} DAG was not loaded"
 
-    assert dag.timetable.summary == "None"
+    assert dag.timetable.__class__.__name__ == "NullTimetable"
     assert dag.catchup is False
 
     expected_tags = {
