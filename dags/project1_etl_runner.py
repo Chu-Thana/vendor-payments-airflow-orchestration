@@ -20,7 +20,7 @@ default_args = {
 
 
 with DAG(
-    dag_id="vendor_payments_etl_orchestration",
+    dag_id="vendor_payments_batch_etl_runner",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
