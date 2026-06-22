@@ -30,8 +30,9 @@ jobs:
 
       - name: Run Ruff lint
         run: |
-          python -m ruff check .
+          python -m ruff check dags tests scripts
 
-      - name: Validate Airflow DAG imports
+      - name: Run automated tests
         run: |
-          python -m pytest tests/test_dags.py
+          python -m pytest tests -q
+

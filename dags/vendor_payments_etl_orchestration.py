@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from airflow import DAG
@@ -13,6 +13,7 @@ from airflow.operators.python import PythonOperator
 
 PROJECT1_ROOT = Path("/opt/airflow/project1")
 PROJECT3_ROOT = Path("/opt/airflow/project3")
+PROJECT5_ROOT = Path("/opt/airflow/project5")
 PROJECT4_OUTPUT_ROOT = Path("/opt/airflow/output")
 
 PROJECT1_PIPELINE_SCRIPT = PROJECT1_ROOT / "scripts/pipeline/run_pipeline.py"
@@ -27,6 +28,16 @@ GOLD_OUTPUT_DIR = PROJECT1_ROOT / "data/processed/gold"
 PROJECT3_STAGING_OUTPUT = (
     PROJECT3_ROOT
     / "output/staging/vendor_payments_streaming_staging.jsonl"
+)
+
+PROJECT5_REDSHIFT_SUMMARY_SCRIPT = (
+    PROJECT5_ROOT
+    / "scripts/warehouse/generate_redshift_summary.py"
+)
+
+PROJECT5_REDSHIFT_SUMMARY = (
+    PROJECT5_ROOT
+    / "output/reports/redshift_execution_summary.json"
 )
 
 ORCHESTRATION_SUMMARY = (
@@ -136,7 +147,7 @@ def run_downstream_deduplication_check() -> dict:
     total_records = 0
     event_ids: set[str] = set()
     duplicate_event_ids = 0
-    missing_event_id = 0
+    missing_event_ids = 0
 
     with PROJECT3_STAGING_OUTPUT.open("r", encoding="utf-8") as file:
         for line in file:
@@ -149,7 +160,7 @@ def run_downstream_deduplication_check() -> dict:
             event_id = record.get("event_id")
 
             if not event_id:
-                missing_event_id += 1
+                missing_event_ids += 1
                 continue
 
             if event_id in event_ids:
@@ -164,7 +175,7 @@ def run_downstream_deduplication_check() -> dict:
         "total_staging_records": total_records,
         "unique_event_ids": len(event_ids),
         "duplicate_event_ids": duplicate_event_ids,
-        "missing_event_id": missing_event_id,
+        "missing_event_ids": missing_event_ids,
         "downstream_deduplication_status": "passed"
         if duplicate_event_ids == 0
         else "duplicates_detected",
@@ -173,50 +184,274 @@ def run_downstream_deduplication_check() -> dict:
     }
 
 
+def check_project5_ready() -> dict:
+    if not PROJECT5_ROOT.exists():
+        raise FileNotFoundError(
+            f"Project 5 root not found: {PROJECT5_ROOT}"
+        )
+
+    if not PROJECT5_REDSHIFT_SUMMARY_SCRIPT.exists():
+        raise FileNotFoundError(
+            "Project 5 Redshift summary script not found: "
+            f"{PROJECT5_REDSHIFT_SUMMARY_SCRIPT}"
+        )
+
+    return {
+        "project5_root": str(PROJECT5_ROOT),
+        "redshift_summary_script": str(
+            PROJECT5_REDSHIFT_SUMMARY_SCRIPT
+        ),
+        "project5_readiness_status": "passed",
+    }
+
+
+def generate_redshift_execution_summary() -> dict:
+    result = subprocess.run(
+        [
+            "python",
+            str(PROJECT5_REDSHIFT_SUMMARY_SCRIPT),
+        ],
+        cwd=str(PROJECT5_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(PROJECT5_ROOT),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Project 5 Redshift summary generation failed.\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    if not PROJECT5_REDSHIFT_SUMMARY.exists():
+        raise FileNotFoundError(
+            "Redshift execution summary was not generated: "
+            f"{PROJECT5_REDSHIFT_SUMMARY}"
+        )
+
+    return {
+        "summary_file": str(PROJECT5_REDSHIFT_SUMMARY),
+        "generation_status": "passed",
+        "stdout": result.stdout.strip(),
+    }
+
+
+def validate_redshift_execution_summary() -> dict:
+    if not PROJECT5_REDSHIFT_SUMMARY.exists():
+        raise FileNotFoundError(
+            "Redshift execution summary not found: "
+            f"{PROJECT5_REDSHIFT_SUMMARY}"
+        )
+
+    with PROJECT5_REDSHIFT_SUMMARY.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        summary = json.load(file)
+
+    execution = summary.get("execution", {})
+    batch = summary.get("batch", {})
+    streaming = summary.get("streaming", {})
+    validation = summary.get("validation", {})
+
+    landing_metrics = streaming.get(
+        "landing_metrics",
+        {},
+    )
+    analytics_metrics = streaming.get(
+        "analytics_metrics",
+        {},
+    )
+
+    total_rows = int(
+        landing_metrics.get("total_rows", 0)
+    )
+    distinct_event_ids = int(
+        landing_metrics.get("distinct_event_ids", 0)
+    )
+    duplicate_event_ids = int(
+        landing_metrics.get("duplicate_event_ids", 0)
+    )
+    missing_event_ids = int(
+        landing_metrics.get("missing_event_ids", 0)
+    )
+    analytics_total_events = int(
+        analytics_metrics.get("total_events", 0)
+    )
+
+    validation_errors: list[str] = []
+
+    if execution.get("status") != "PASS":
+        validation_errors.append(
+            "Redshift execution status is not PASS."
+        )
+
+    if batch.get("validation_status") != "PASS":
+        validation_errors.append(
+            "Batch Redshift validation status is not PASS."
+        )
+
+    if streaming.get("validation_status") != "PASS":
+        validation_errors.append(
+            "Streaming Redshift validation status is not PASS."
+        )
+
+    if validation.get("status") != "PASS":
+        validation_errors.append(
+            "Overall Redshift validation status is not PASS."
+        )
+
+    if int(batch.get("landing_table_count", 0)) != 5:
+        validation_errors.append(
+            "Expected 5 Batch landing tables."
+        )
+
+    if int(batch.get("analytics_view_count", 0)) != 5:
+        validation_errors.append(
+            "Expected 5 Batch analytics views."
+        )
+
+    if int(streaming.get("analytics_view_count", 0)) != 4:
+        validation_errors.append(
+            "Expected 4 Streaming analytics views."
+        )
+
+    if total_rows <= 0:
+        validation_errors.append(
+            "Streaming landing table contains no rows."
+        )
+
+    if distinct_event_ids != total_rows:
+        validation_errors.append(
+            "Distinct event IDs do not match total rows."
+        )
+
+    if duplicate_event_ids != 0:
+        validation_errors.append(
+            "Duplicate event IDs were detected."
+        )
+
+    if missing_event_ids != 0:
+        validation_errors.append(
+            "Missing event IDs were detected."
+        )
+
+    if analytics_total_events != total_rows:
+        validation_errors.append(
+            "Analytics total events do not match landing rows."
+        )
+
+    if validation_errors:
+        raise ValueError(
+            "Redshift metadata validation failed: "
+            + " ".join(validation_errors)
+        )
+
+    return {
+        "available": True,
+        "summary_file": str(PROJECT5_REDSHIFT_SUMMARY),
+        "execution_status": execution["status"],
+        "runtime_seconds": execution["runtime_seconds"],
+        "redshift": summary["redshift"],
+        "batch": batch,
+        "streaming": streaming,
+        "validation_status": validation["status"],
+    }
+
+
 def generate_orchestration_summary(**context) -> None:
     task_instance = context["ti"]
 
-    silver_validation = task_instance.xcom_pull(task_ids="validate_silver_output")
-    gold_validation = task_instance.xcom_pull(task_ids="validate_gold_outputs")
+    silver_validation = task_instance.xcom_pull(
+        task_ids="validate_silver_output"
+    )
+    gold_validation = task_instance.xcom_pull(
+        task_ids="validate_gold_outputs"
+    )
     staging_validation = task_instance.xcom_pull(
         task_ids="check_project3_streaming_staging"
     )
     deduplication_check = task_instance.xcom_pull(
         task_ids="run_downstream_deduplication_check"
     )
+    project5_readiness = task_instance.xcom_pull(
+        task_ids="check_project5_ready"
+    )
+    redshift_generation = task_instance.xcom_pull(
+        task_ids="generate_redshift_execution_summary"
+    )
+    redshift_validation = task_instance.xcom_pull(
+        task_ids="validate_redshift_execution_summary"
+    )
 
-    ORCHESTRATION_SUMMARY.parent.mkdir(parents=True, exist_ok=True)
+    ORCHESTRATION_SUMMARY.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     summary = {
-        "dag_id": "vendor_payments_batch_orchestration",
-        "generated_at": datetime.utcnow().isoformat(),
-        "project1_pipeline_status": "completed",
-        "silver_validation": silver_validation,
-        "gold_validation": gold_validation,
-        "project3_staging_validation": staging_validation,
-        "downstream_deduplication_check": deduplication_check,
+        "project": "Vendor Payments Airflow Orchestration",
+        "pipeline_version": "1.0.0",
+        "dag_id": "vendor_payments_data_platform_orchestration",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "batch_pipeline": {
+            "project1_status": "completed",
+            "silver_validation": silver_validation,
+            "gold_validation": gold_validation,
+        },
+        "streaming_pipeline": {
+            "project3_staging_validation": staging_validation,
+            "downstream_deduplication_check": deduplication_check,
+        },
+        "cloud_pipeline": {
+            "project5_readiness": project5_readiness,
+            "redshift_summary_generation": redshift_generation,
+        },
+        "redshift_pipeline": redshift_validation,
         "orchestration_status": "completed",
+        "validation": {
+            "status": "PASS",
+        },
         "design_note": (
-            "Project 3 follows an at-least-once processing mindset. "
-            "Airflow provides downstream validation and second-level "
-            "deduplication before analytics."
+            "Airflow orchestrates Project 1 Batch ETL, validates "
+            "Project 3 streaming staging output, performs downstream "
+            "deduplication checks, and validates Project 5 Amazon "
+            "Redshift Serverless runtime metadata."
         ),
     }
 
-    with ORCHESTRATION_SUMMARY.open("w", encoding="utf-8") as file:
-        json.dump(summary, file, indent=2)
+    with ORCHESTRATION_SUMMARY.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            summary,
+            file,
+            indent=2,
+        )
 
 
 with DAG(
-    dag_id="vendor_payments_batch_orchestration",
+    dag_id="vendor_payments_data_platform_orchestration",
     description=(
-        "Orchestrates Vendor Payments batch ETL, validates curated outputs, "
-        "and checks streaming staging readiness."
+        "Orchestrates Vendor Payments Batch ETL, streaming validation, "
+        "downstream deduplication, and Amazon Redshift metadata validation."
     ),
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["vendor-payments", "etl", "airflow", "orchestration"],
+    tags=[
+        "vendor-payments",
+        "batch",
+        "streaming",
+        "redshift",
+        "orchestration",
+    ],
 ) as dag:
     start = EmptyOperator(task_id="start")
 
@@ -250,6 +485,21 @@ with DAG(
         python_callable=run_downstream_deduplication_check,
     )
 
+    check_project5_ready_task = PythonOperator(
+        task_id="check_project5_ready",
+        python_callable=check_project5_ready,
+    )
+
+    generate_redshift_execution_summary_task = PythonOperator(
+        task_id="generate_redshift_execution_summary",
+        python_callable=generate_redshift_execution_summary,
+    )
+
+    validate_redshift_execution_summary_task = PythonOperator(
+        task_id="validate_redshift_execution_summary",
+        python_callable=validate_redshift_execution_summary,
+    )
+
     generate_orchestration_summary_task = PythonOperator(
         task_id="generate_orchestration_summary",
         python_callable=generate_orchestration_summary,
@@ -265,6 +515,9 @@ with DAG(
         >> validate_gold_outputs_task
         >> check_project3_streaming_staging_task
         >> run_downstream_deduplication_check_task
+        >> check_project5_ready_task
+        >> generate_redshift_execution_summary_task
+        >> validate_redshift_execution_summary_task
         >> generate_orchestration_summary_task
         >> end
     )

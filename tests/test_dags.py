@@ -3,118 +3,154 @@ from pathlib import Path
 from airflow.models import DagBag
 
 
-# Resolve project root directory.
-# This file is usually located in the tests/ folder, so parents[1]
-# points back to the project root.
 ROOT_DIR = Path(__file__).resolve().parents[1]
-
-# Airflow DAG files should be stored in the dags/ directory.
 DAGS_DIR = ROOT_DIR / "dags"
 
+DAG_ID = "vendor_payments_data_platform_orchestration"
 
-def test_dag_folder_exists():
-    """
-    Check that the dags/ folder exists.
 
-    This prevents CI from passing if the Airflow DAG folder is missing
-    or the project structure is incorrect.
-    """
+def load_dag_bag() -> DagBag:
+    return DagBag(
+        dag_folder=str(DAGS_DIR),
+        include_examples=False,
+    )
+
+
+def test_dag_folder_exists() -> None:
     assert DAGS_DIR.exists(), f"DAG folder not found: {DAGS_DIR}"
 
 
-def test_airflow_dags_import_without_errors():
-    """
-    Load all DAG files using Airflow DagBag and check for import errors.
+def test_airflow_dags_import_without_errors() -> None:
+    dag_bag = load_dag_bag()
 
-    This test catches syntax errors, missing imports, broken dependencies,
-    or invalid DAG definitions before the DAG is deployed to Airflow.
-    """
-    dag_bag = DagBag(
-        dag_folder=str(DAGS_DIR),
-        include_examples=False,
+    assert not dag_bag.import_errors, (
+        f"DAG import errors: {dag_bag.import_errors}"
     )
-
-    assert not dag_bag.import_errors, f"DAG import errors: {dag_bag.import_errors}"
     assert len(dag_bag.dags) > 0, "No DAGs were loaded"
 
 
-def test_vendor_payments_dag_has_expected_tasks():
-    """
-    Check that the vendor payments DAG is loaded and contains all expected tasks.
+def test_vendor_payments_dag_is_loaded() -> None:
+    dag_bag = load_dag_bag()
+    dag = dag_bag.dags.get(DAG_ID)
 
-    This verifies the DAG structure at the task level. If a task is renamed,
-    removed, or not created correctly, this test will fail.
-    """
-    dag_bag = DagBag(
-        dag_folder=str(DAGS_DIR),
-        include_examples=False,
-    )
+    assert dag is not None, f"{DAG_ID} DAG was not loaded"
 
-    dag = dag_bag.dags.get("vendor_payments_etl_orchestration")
 
-    assert dag is not None, "vendor_payments_etl_orchestration DAG was not loaded"
+def test_vendor_payments_dag_has_expected_tasks() -> None:
+    dag_bag = load_dag_bag()
+    dag = dag_bag.dags.get(DAG_ID)
 
-    # Expected task IDs in the orchestration workflow.
+    assert dag is not None, f"{DAG_ID} DAG was not loaded"
+
     expected_tasks = {
         "start",
-        "check_project1_source",
-        "clean_previous_outputs",
-        "run_vendor_payments_pipeline",
-        "check_silver_output",
-        "check_gold_outputs",
+        "check_project1_ready",
+        "run_project1_pipeline",
+        "validate_silver_output",
+        "validate_gold_outputs",
+        "check_project3_streaming_staging",
+        "run_downstream_deduplication_check",
+        "check_project5_ready",
+        "generate_redshift_execution_summary",
+        "validate_redshift_execution_summary",
+        "generate_orchestration_summary",
         "end",
     }
 
-    # The DAG should contain exactly these tasks:
-    # no missing tasks and no unexpected extra tasks.
     assert set(dag.task_ids) == expected_tasks
+    assert len(dag.task_ids) == 12
 
 
-def test_vendor_payments_dag_task_dependencies():
-    """
-    Check that task dependencies are wired in the correct order.
+def test_vendor_payments_dag_task_dependencies() -> None:
+    dag_bag = load_dag_bag()
+    dag = dag_bag.dags.get(DAG_ID)
 
-    This validates the Airflow workflow sequence:
+    assert dag is not None, f"{DAG_ID} DAG was not loaded"
 
-    start
-    -> check_project1_source
-    -> clean_previous_outputs
-    -> run_vendor_payments_pipeline
-    -> check_silver_output
-    -> check_gold_outputs
-    -> end
-    """
-    dag_bag = DagBag(
-        dag_folder=str(DAGS_DIR),
-        include_examples=False,
+    expected_dependencies = {
+        "start": {"check_project1_ready"},
+        "check_project1_ready": {"run_project1_pipeline"},
+        "run_project1_pipeline": {"validate_silver_output"},
+        "validate_silver_output": {"validate_gold_outputs"},
+        "validate_gold_outputs": {
+            "check_project3_streaming_staging"
+        },
+        "check_project3_streaming_staging": {
+            "run_downstream_deduplication_check"
+        },
+        "run_downstream_deduplication_check": {
+            "check_project5_ready"
+        },
+        "check_project5_ready": {
+            "generate_redshift_execution_summary"
+        },
+        "generate_redshift_execution_summary": {
+            "validate_redshift_execution_summary"
+        },
+        "validate_redshift_execution_summary": {
+            "generate_orchestration_summary"
+        },
+        "generate_orchestration_summary": {"end"},
+        "end": set(),
+    }
+
+    for task_id, downstream_task_ids in expected_dependencies.items():
+        assert (
+            dag.get_task(task_id).downstream_task_ids
+            == downstream_task_ids
+        )
+
+
+def test_vendor_payments_dag_configuration() -> None:
+    dag_bag = load_dag_bag()
+    dag = dag_bag.dags.get(DAG_ID)
+
+    assert dag is not None, f"{DAG_ID} DAG was not loaded"
+
+    assert dag.schedule_interval is None
+    assert dag.catchup is False
+
+    expected_tags = {
+        "vendor-payments",
+        "batch",
+        "streaming",
+        "redshift",
+        "orchestration",
+    }
+
+    assert set(dag.tags) == expected_tags
+
+
+def test_redshift_tasks_exist_in_dependency_order() -> None:
+    dag_bag = load_dag_bag()
+    dag = dag_bag.dags.get(DAG_ID)
+
+    assert dag is not None, f"{DAG_ID} DAG was not loaded"
+
+    check_project5_task = dag.get_task("check_project5_ready")
+    generate_summary_task = dag.get_task(
+        "generate_redshift_execution_summary"
+    )
+    validate_summary_task = dag.get_task(
+        "validate_redshift_execution_summary"
+    )
+    orchestration_summary_task = dag.get_task(
+        "generate_orchestration_summary"
     )
 
-    dag = dag_bag.dags.get("vendor_payments_etl_orchestration")
-
-    assert dag is not None, "vendor_payments_etl_orchestration DAG was not loaded"
-
-    # Each assertion checks the downstream task of one task.
-    # This ensures the pipeline runs in the intended order.
-    assert dag.get_task("start").downstream_task_ids == {"check_project1_source"}
-
-    assert dag.get_task("check_project1_source").downstream_task_ids == {
-        "clean_previous_outputs"
+    assert check_project5_task.downstream_task_ids == {
+        "generate_redshift_execution_summary"
     }
 
-    assert dag.get_task("clean_previous_outputs").downstream_task_ids == {
-        "run_vendor_payments_pipeline"
+    assert generate_summary_task.downstream_task_ids == {
+        "validate_redshift_execution_summary"
     }
 
-    assert dag.get_task("run_vendor_payments_pipeline").downstream_task_ids == {
-        "check_silver_output"
+    assert validate_summary_task.downstream_task_ids == {
+        "generate_orchestration_summary"
     }
 
-    assert dag.get_task("check_silver_output").downstream_task_ids == {
-        "check_gold_outputs"
+    assert orchestration_summary_task.upstream_task_ids == {
+        "validate_redshift_execution_summary"
     }
 
-    assert dag.get_task("check_gold_outputs").downstream_task_ids == {"end"}
-
-    # The end task should be the final node in the DAG.
-    # It should not trigger any downstream tasks.
-    assert dag.get_task("end").downstream_task_ids == set()
