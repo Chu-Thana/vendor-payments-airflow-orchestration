@@ -48,6 +48,7 @@ services:
       - "${VENDOR_ETL_PATH}:/opt/airflow/project1"
       - "${VENDOR_STREAMING_PATH}:/opt/airflow/project3"
       - "${VENDOR_CLOUD_PATH}:/opt/airflow/project5"
+      - "${VENDOR_STREAMING_STAGING_PATH}:/opt/airflow/staging:ro"
     command: >
       bash -c "
       airflow db migrate &&

@@ -16,9 +16,15 @@ def send_telegram_alert(message: str) -> None:
         "text": message,
     }
 
-    response = requests.post(url, json=payload, timeout=10)
-    print("Telegram status:", response.status_code)
-    print("Telegram response:", response.text)
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+
+        print("Telegram status:", response.status_code)
+        print("Telegram response:", response.text)
+
+    except requests.RequestException as exc:
+        print(f"Telegram alert failed: {exc}")
 
 
 def notify_success(context):

@@ -8,13 +8,20 @@ from pathlib import Path
 import pandas as pd
 
 BASE_PATH = os.getenv("AIRFLOW_DATA_PATH", "/opt/airflow")
-STAGING_FILE = Path(BASE_PATH) / "staging/staging_sales_events.jsonl"
-OUTPUT_FILE = Path(BASE_PATH) / "data/processed/sales_events_extracted.csv"
+STAGING_FILE = (
+    Path(BASE_PATH)
+    / "staging/vendor_payments_streaming_staging.jsonl"
+)
+
+OUTPUT_FILE = (
+    Path(BASE_PATH)
+    / "data/processed/vendor_payments_streaming_extracted.csv"
+)
 
 logger = logging.getLogger(__name__)
 
 
-def extract_staging_sales() -> str:
+def extract_vendor_payments_staging() -> str:
     """
     Read raw JSONL events from staging and convert them to CSV for downstream tasks.
     Returns output file path.
@@ -61,4 +68,4 @@ def extract_staging_sales() -> str:
 
 
 if __name__ == "__main__":
-    extract_staging_sales()
+    extract_vendor_payments_staging()

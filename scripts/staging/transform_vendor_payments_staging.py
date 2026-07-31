@@ -9,11 +9,20 @@ import pandas as pd
 
 BASE_PATH = os.getenv("AIRFLOW_DATA_PATH", "/opt/airflow")
 
-INPUT_FILE = Path(BASE_PATH) / "data/processed/sales_events_extracted.csv"
-OUTPUT_FILE = Path(BASE_PATH) / "data/processed/sales_events_cleaned.csv"
+INPUT_FILE = (
+    Path(BASE_PATH)
+    / "data/processed/vendor_payments_streaming_extracted.csv"
+)
+
+OUTPUT_FILE = (
+    Path(BASE_PATH)
+    / "data/processed/vendor_payments_streaming_cleaned.csv"
+)
 
 SILVER_S3_BUCKET = "sales-analytics-lakehouse-thana"
-SILVER_S3_KEY = "silver/sales_cleaned.csv"
+SILVER_S3_KEY = (
+    "silver/vendor_payments_streaming_cleaned.csv"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +33,7 @@ def upload_to_s3(local_path: str, bucket: str, key: str) -> None:
     logger.info(f"Uploaded {local_path} to s3://{bucket}/{key}")
 
 
-def transform_staging_sales() -> str:
+def transform_vendor_payments_staging() -> str:
     """
     Transform extracted staging data into silver layer.
 
@@ -50,40 +59,89 @@ def transform_staging_sales() -> str:
 
     required_columns = {
         "event_id",
-        "order_id",
-        "region",
-        "sales",
-        "event_time",
-        "is_duplicate",
+        "event_type",
+        "event_timestamp",
+        "source_system",
+        "source_row_hash",
+        "business_composite_key",
+        "fiscal_year",
+        "supplier_name",
+        "department",
+        "payment_amount",
+        "dedup_status",
     }
 
     missing_columns = required_columns - set(df.columns)
     if missing_columns:
-        logger.error(f"Schema mismatch. Missing columns: {sorted(missing_columns)}")
-        raise ValueError(f"Schema mismatch. Missing columns: {sorted(missing_columns)}")
+        logger.error(
+            f"Schema mismatch. Missing columns: "
+            f"{sorted(missing_columns)}"
+        )
+        raise ValueError(
+            f"Schema mismatch. Missing columns: "
+            f"{sorted(missing_columns)}"
+        )
 
     # Type casting
-    df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
-    df["is_duplicate"] = pd.to_numeric(df["is_duplicate"], errors="coerce").fillna(1).astype(int)
-    df["event_time"] = pd.to_datetime(df["event_time"], errors="coerce")
+    df["payment_amount"] = pd.to_numeric(
+        df["payment_amount"],
+        errors="coerce",
+    )
+
+    df["fiscal_year"] = pd.to_numeric(
+        df["fiscal_year"],
+        errors="coerce",
+    )
+
+    df["event_timestamp"] = pd.to_datetime(
+        df["event_timestamp"],
+        errors="coerce",
+        utc=True,
+    )
 
     # 1) Drop invalid rows
     before_invalid_filter = len(df)
-    df = df.dropna(subset=["event_id", "order_id", "region", "sales", "event_time"])
-    df = df[df["sales"] >= 0]
+
+    df = df.dropna(
+        subset=[
+            "event_id",
+            "event_type",
+            "event_timestamp",
+            "source_system",
+            "source_row_hash",
+            "business_composite_key",
+            "fiscal_year",
+            "supplier_name",
+            "department",
+            "payment_amount",
+            "dedup_status",
+        ]
+    )
+
     invalid_dropped = before_invalid_filter - len(df)
 
-    # 2) Drop duplicates already flagged by Kafka consumer
+    # 2) Keep records accepted by Kafka consumer
     before_flag_filter = len(df)
-    df = df[df["is_duplicate"] == 0]
+
+    df = df[df["dedup_status"] == "accepted"]
+
     flagged_duplicate_dropped = before_flag_filter - len(df)
 
-    logger.info("Applying secondary deduplication by event_id in Airflow")
+    logger.info(
+        "Applying secondary deduplication by event_id in Airflow"
+    )
 
-    # 3) Secondary deduplication in Airflow (safety net)
+    # 3) Secondary deduplication in Airflow
     before_secondary_dedup = len(df)
-    df = df.drop_duplicates(subset=["event_id"], keep="first")
-    secondary_duplicate_dropped = before_secondary_dedup - len(df)
+
+    df = df.drop_duplicates(
+        subset=["event_id"],
+        keep="first",
+    )
+
+    secondary_duplicate_dropped = (
+            before_secondary_dedup - len(df)
+    )
 
     final_count = len(df)
 
@@ -93,7 +151,7 @@ def transform_staging_sales() -> str:
 
     logger.info(f"Raw rows before cleaning: {raw_count}")
     logger.info(f"Invalid rows dropped: {invalid_dropped}")
-    logger.info(f"Duplicates dropped by Kafka flag: {flagged_duplicate_dropped}")
+    logger.info(f"Non-accepted records dropped by dedup status: {flagged_duplicate_dropped}")
     logger.info(f"Duplicates dropped by Airflow secondary dedup: {secondary_duplicate_dropped}")
     logger.info(f"Final clean rows after transform: {final_count}")
 
@@ -112,4 +170,4 @@ def transform_staging_sales() -> str:
 
 
 if __name__ == "__main__":
-    transform_staging_sales()
+    transform_vendor_payments_staging()
