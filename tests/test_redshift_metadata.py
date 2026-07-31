@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from dags import vendor_payments_etl_orchestration as orchestration
+from dags import vendor_payments_data_platform_orchestration as orchestration
 
 
 def build_valid_summary() -> dict:

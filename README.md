@@ -93,7 +93,7 @@ Values are derived from real execution artifacts rather than being hard-coded in
 The repository contains three focused DAGs:
 
 ```text
-streaming_staging_pipeline
+vendor_payments_streaming_validation
 vendor_payments_batch_etl_runner
 vendor_payments_data_platform_orchestration
 ```
@@ -109,10 +109,24 @@ vendor_payments_data_platform_orchestration
 DAG file:
 
 ```text
-dags/vendor_payments_etl_orchestration.py
+dags/vendor_payments_data_platform_orchestration.py
 ```
 
 The main DAG runs manually with `schedule=None` and coordinates Batch, Streaming, Cloud-readiness, Redshift metadata, and reporting tasks.
+
+### Streaming Validation DAG
+
+```text
+vendor_payments_streaming_validation
+```
+
+DAG file:
+
+```text
+dags/vendor_payments_streaming_validation.py
+```
+
+This DAG validates the Kafka Consumer staging output through Extract, Transform, secondary deduplication, warehouse-ready summary generation, S3 upload, and Telegram callbacks.
 
 ---
 
@@ -552,9 +566,9 @@ vendor-payments-airflow-orchestration/
 │       └── legacy/
 │
 ├── dags/
-│   ├── project1_etl_runner.py
-│   ├── streaming_staging_pipeline.py
-│   └── vendor_payments_etl_orchestration.py
+│   ├── vendor_payments_batch_etl_runner.py
+│   ├── vendor_payments_data_platform_orchestration.py
+│   └── vendor_payments_streaming_validation.py
 │
 ├── output/
 │   └── reports/
@@ -657,7 +671,6 @@ This project is the coordination and validation layer across the platform. It do
 ## 🛣️ Planned Development
 
 - Add Cloud upload and Athena readiness metadata where useful
-- Add alerting for failed orchestration runs
 - Add centralized observability and log aggregation
 - Add scheduled production execution after deployment
 
