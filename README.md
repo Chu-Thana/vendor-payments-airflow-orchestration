@@ -134,13 +134,13 @@ This DAG validates the Kafka Consumer staging output through Extract, Transform,
 
 ```text
 start
-→ check_project1_ready
-→ run_project1_pipeline
+→ check_batch_etl_ready
+→ run_batch_etl_pipeline
 → validate_silver_output
 → validate_gold_outputs
-→ check_project3_streaming_staging
+→ check_streaming_staging_ready
 → run_downstream_deduplication_check
-→ check_project5_ready
+→ check_cloud_platform_ready
 → generate_redshift_execution_summary
 → validate_redshift_execution_summary
 → generate_orchestration_summary
@@ -155,16 +155,16 @@ The DAG intentionally keeps task dependencies explicit. This makes the execution
 
 ## 🧩 Task Responsibilities
 
-### `check_project1_ready`
+### `check_batch_etl_ready`
 
 Checks that the Batch ETL repository and pipeline entry point are available inside the Airflow container.
 
 ```text
-/opt/airflow/project1
-/opt/airflow/project1/scripts/pipeline/run_pipeline.py
+/opt/airflow/vendor_payments_batch_etl
+/opt/airflow/vendor_payments_batch_etl/scripts/pipeline/run_pipeline.py
 ```
 
-### `run_project1_pipeline`
+### `run_batch_etl_pipeline`
 
 Runs the external Batch ETL pipeline without duplicating its processing logic inside the DAG.
 
@@ -177,7 +177,7 @@ python -m scripts.pipeline.run_pipeline
 Validates that the Silver output exists and is not empty.
 
 ```text
-/opt/airflow/project1/data/processed/silver/vendor_payments_silver.csv
+/opt/airflow/vendor_payments_batch_etl/data/processed/silver/vendor_payments_silver.csv
 ```
 
 ### `validate_gold_outputs`
@@ -192,12 +192,12 @@ mart_spending_by_fiscal_year.csv
 mart_spending_by_supplier_top_n.csv
 ```
 
-### `check_project3_streaming_staging`
+### `check_streaming_staging_ready`
 
 Checks that the Kafka Streaming staging artifact exists and contains data.
 
 ```text
-/opt/airflow/project3/output/staging/vendor_payments_streaming_staging.jsonl
+/opt/airflow/vendor_payments_streaming/output/staging/vendor_payments_streaming_staging.jsonl
 ```
 
 ### `run_downstream_deduplication_check`
@@ -219,13 +219,13 @@ missing_event_ids = 0
 downstream_deduplication_status = passed
 ```
 
-### `check_project5_ready`
+### `check_cloud_platform_ready`
 
 Checks that the Cloud Data Platform repository and Redshift metadata generator are mounted and available.
 
 ```text
-/opt/airflow/project5
-/opt/airflow/project5/scripts/warehouse/generate_redshift_summary.py
+/opt/airflow/vendor_payments_cloud_platform
+/opt/airflow/vendor_payments_cloud_platform/scripts/warehouse/generate_redshift_summary.py
 ```
 
 ### `generate_redshift_execution_summary`
@@ -233,13 +233,13 @@ Checks that the Cloud Data Platform repository and Redshift metadata generator a
 Runs the Cloud-platform metadata generator through the Redshift Data API.
 
 ```text
-python /opt/airflow/project5/scripts/warehouse/generate_redshift_summary.py
+python /opt/airflow/vendor_payments_cloud_platform/scripts/warehouse/generate_redshift_summary.py
 ```
 
 This task queries the existing Redshift Serverless environment and refreshes:
 
 ```text
-/opt/airflow/project5/output/reports/redshift_execution_summary.json
+/opt/airflow/vendor_payments_cloud_platform/output/reports/redshift_execution_summary.json
 ```
 
 It does not duplicate Redshift table-creation or warehouse-loading logic inside the Airflow DAG.
@@ -397,9 +397,9 @@ This approach keeps the architecture modular: Airflow coordinates and validates,
 The external repositories are mounted into the Airflow containers:
 
 ```text
-/opt/airflow/project1
-/opt/airflow/project3
-/opt/airflow/project5
+/opt/airflow/vendor_payments_batch_etl
+/opt/airflow/vendor_payments_streaming
+/opt/airflow/vendor_payments_cloud_platform
 /opt/airflow/output
 ```
 

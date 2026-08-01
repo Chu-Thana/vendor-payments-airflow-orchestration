@@ -71,7 +71,7 @@ def test_validate_redshift_summary_passes(
 
     monkeypatch.setattr(
         orchestration,
-        "PROJECT5_REDSHIFT_SUMMARY",
+        "REDSHIFT_EXECUTION_SUMMARY",
         summary_file,
     )
 
@@ -97,7 +97,7 @@ def test_validate_redshift_summary_detects_duplicates(
 
     monkeypatch.setattr(
         orchestration,
-        "PROJECT5_REDSHIFT_SUMMARY",
+        "REDSHIFT_EXECUTION_SUMMARY",
         summary_file,
     )
 
@@ -121,7 +121,7 @@ def test_validate_redshift_summary_detects_missing_event_ids(
 
     monkeypatch.setattr(
         orchestration,
-        "PROJECT5_REDSHIFT_SUMMARY",
+        "REDSHIFT_EXECUTION_SUMMARY",
         summary_file,
     )
 
@@ -143,7 +143,7 @@ def test_validate_redshift_summary_detects_view_count_error(
 
     monkeypatch.setattr(
         orchestration,
-        "PROJECT5_REDSHIFT_SUMMARY",
+        "REDSHIFT_EXECUTION_SUMMARY",
         summary_file,
     )
 
@@ -162,7 +162,7 @@ def test_validate_redshift_summary_requires_file(
 
     monkeypatch.setattr(
         orchestration,
-        "PROJECT5_REDSHIFT_SUMMARY",
+        "REDSHIFT_EXECUTION_SUMMARY",
         missing_file,
     )
 

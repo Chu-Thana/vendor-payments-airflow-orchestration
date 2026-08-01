@@ -17,58 +17,58 @@ except ImportError:
     from airflow.operators.python import PythonOperator
 
 
-PROJECT1_ROOT = Path("/opt/airflow/project1")
-PROJECT3_ROOT = Path("/opt/airflow/project3")
-PROJECT5_ROOT = Path("/opt/airflow/project5")
-PROJECT4_OUTPUT_ROOT = Path("/opt/airflow/output")
+BATCH_ETL_ROOT = Path("/opt/airflow/vendor_payments_batch_etl")
+STREAMING_PIPELINE_ROOT = Path("/opt/airflow/vendor_payments_streaming")
+CLOUD_PLATFORM_ROOT = Path("/opt/airflow/vendor_payments_cloud_platform")
+ORCHESTRATION_OUTPUT_ROOT = Path("/opt/airflow/output")
 
-PROJECT1_PIPELINE_SCRIPT = PROJECT1_ROOT / "scripts/pipeline/run_pipeline.py"
+BATCH_ETL_PIPELINE_SCRIPT = BATCH_ETL_ROOT / "scripts/pipeline/run_pipeline.py"
 
 SILVER_OUTPUT = (
-    PROJECT1_ROOT
+    BATCH_ETL_ROOT
     / "data/processed/silver/vendor_payments_silver.csv"
 )
 
-GOLD_OUTPUT_DIR = PROJECT1_ROOT / "data/processed/gold"
+GOLD_OUTPUT_DIR = BATCH_ETL_ROOT / "data/processed/gold"
 
-PROJECT3_STAGING_OUTPUT = (
-    PROJECT3_ROOT
+STREAMING_STAGING_OUTPUT = (
+    STREAMING_PIPELINE_ROOT
     / "output/staging/vendor_payments_streaming_staging.jsonl"
 )
 
-PROJECT5_REDSHIFT_SUMMARY_SCRIPT = (
-    PROJECT5_ROOT
+REDSHIFT_SUMMARY_SCRIPT = (
+    CLOUD_PLATFORM_ROOT
     / "scripts/warehouse/generate_redshift_summary.py"
 )
 
-PROJECT5_REDSHIFT_SUMMARY = (
-    PROJECT5_ROOT
+REDSHIFT_EXECUTION_SUMMARY = (
+    CLOUD_PLATFORM_ROOT
     / "output/reports/redshift_execution_summary.json"
 )
 
 ORCHESTRATION_SUMMARY = (
-    PROJECT4_OUTPUT_ROOT
+    ORCHESTRATION_OUTPUT_ROOT
     / "reports/airflow_orchestration_summary.json"
 )
 
 
-def check_project1_ready() -> None:
-    if not PROJECT1_ROOT.exists():
-        raise FileNotFoundError(f"Project 1 root not found: {PROJECT1_ROOT}")
+def check_batch_etl_ready() -> None:
+    if not BATCH_ETL_ROOT.exists():
+        raise FileNotFoundError(f"Batch ETL root not found: {BATCH_ETL_ROOT}")
 
-    if not PROJECT1_PIPELINE_SCRIPT.exists():
+    if not BATCH_ETL_PIPELINE_SCRIPT.exists():
         raise FileNotFoundError(
-            f"Project 1 pipeline script not found: {PROJECT1_PIPELINE_SCRIPT}"
+            f"Batch ETL pipeline script not found: {BATCH_ETL_PIPELINE_SCRIPT}"
         )
 
 
-def run_project1_pipeline() -> None:
+def run_batch_etl_pipeline() -> None:
     result = subprocess.run(
         ["python", "-m", "scripts.pipeline.run_pipeline"],
-        cwd=str(PROJECT1_ROOT),
+        cwd=str(BATCH_ETL_ROOT),
         env={
             **os.environ,
-            "PYTHONPATH": str(PROJECT1_ROOT),
+            "PYTHONPATH": str(BATCH_ETL_ROOT),
         },
         check=False,
         capture_output=True,
@@ -77,7 +77,7 @@ def run_project1_pipeline() -> None:
 
     if result.returncode != 0:
         raise RuntimeError(
-            "Project 1 pipeline failed.\n"
+            "Batch ETL pipeline failed.\n"
             f"RETURN CODE: {result.returncode}\n"
             f"STDOUT:\n{result.stdout}\n"
             f"STDERR:\n{result.stderr}"
@@ -131,23 +131,27 @@ def validate_gold_outputs() -> dict:
     }
 
 
-def check_project3_streaming_staging() -> dict:
-    if not PROJECT3_STAGING_OUTPUT.exists():
+def check_streaming_staging_ready() -> dict:
+    if not STREAMING_STAGING_OUTPUT.exists():
         raise FileNotFoundError(
-            f"Project 3 staging output not found: {PROJECT3_STAGING_OUTPUT}"
+            "Streaming staging output not found: "
+            f"{STREAMING_STAGING_OUTPUT}"
         )
 
-    file_size_bytes = PROJECT3_STAGING_OUTPUT.stat().st_size
+    file_size_bytes = STREAMING_STAGING_OUTPUT.stat().st_size
 
     if file_size_bytes == 0:
         raise ValueError(
-            f"Project 3 staging output is empty: {PROJECT3_STAGING_OUTPUT}"
+            "Streaming staging output is empty: "
+            f"{STREAMING_STAGING_OUTPUT}"
         )
 
     return {
-        "project3_staging_output": str(PROJECT3_STAGING_OUTPUT),
-        "project3_staging_file_size_bytes": file_size_bytes,
-        "project3_staging_status": "passed",
+        "streaming_staging_output": str(
+            STREAMING_STAGING_OUTPUT
+        ),
+        "streaming_staging_file_size_bytes": file_size_bytes,
+        "streaming_staging_status": "passed",
     }
 
 
@@ -157,7 +161,7 @@ def run_downstream_deduplication_check() -> dict:
     duplicate_event_ids = 0
     missing_event_ids = 0
 
-    with PROJECT3_STAGING_OUTPUT.open("r", encoding="utf-8") as file:
+    with STREAMING_STAGING_OUTPUT.open("r", encoding="utf-8") as file:
         for line in file:
             if not line.strip():
                 continue
@@ -177,7 +181,7 @@ def run_downstream_deduplication_check() -> dict:
                 event_ids.add(event_id)
 
     if total_records == 0:
-        raise ValueError("Project 3 staging output contains zero records.")
+        raise ValueError("Streaming staging output contains zero records.")
 
     return {
         "total_staging_records": total_records,
@@ -192,24 +196,24 @@ def run_downstream_deduplication_check() -> dict:
     }
 
 
-def check_project5_ready() -> dict:
-    if not PROJECT5_ROOT.exists():
+def check_cloud_platform_ready() -> dict:
+    if not CLOUD_PLATFORM_ROOT.exists():
         raise FileNotFoundError(
-            f"Project 5 root not found: {PROJECT5_ROOT}"
+            f"Cloud platform root not found: {CLOUD_PLATFORM_ROOT}"
         )
 
-    if not PROJECT5_REDSHIFT_SUMMARY_SCRIPT.exists():
+    if not REDSHIFT_SUMMARY_SCRIPT.exists():
         raise FileNotFoundError(
-            "Project 5 Redshift summary script not found: "
-            f"{PROJECT5_REDSHIFT_SUMMARY_SCRIPT}"
+            "Redshift summary script not found: "
+            f"{REDSHIFT_SUMMARY_SCRIPT}"
         )
 
     return {
-        "project5_root": str(PROJECT5_ROOT),
+        "cloud_platform_root": str(CLOUD_PLATFORM_ROOT),
         "redshift_summary_script": str(
-            PROJECT5_REDSHIFT_SUMMARY_SCRIPT
+            REDSHIFT_SUMMARY_SCRIPT
         ),
-        "project5_readiness_status": "passed",
+        "cloud_platform_readiness_status": "passed",
     }
 
 
@@ -438,12 +442,12 @@ def generate_redshift_execution_summary() -> dict:
     result = subprocess.run(
         [
             "python",
-            str(PROJECT5_REDSHIFT_SUMMARY_SCRIPT),
+            str(REDSHIFT_SUMMARY_SCRIPT),
         ],
-        cwd=str(PROJECT5_ROOT),
+        cwd=str(CLOUD_PLATFORM_ROOT),
         env={
             **os.environ,
-            "PYTHONPATH": str(PROJECT5_ROOT),
+            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
         },
         check=False,
         capture_output=True,
@@ -452,32 +456,32 @@ def generate_redshift_execution_summary() -> dict:
 
     if result.returncode != 0:
         raise RuntimeError(
-            "Project 5 Redshift summary generation failed.\n"
+            "Cloud platform redshift summary generation failed.\n"
             f"STDOUT:\n{result.stdout}\n"
             f"STDERR:\n{result.stderr}"
         )
 
-    if not PROJECT5_REDSHIFT_SUMMARY.exists():
+    if not REDSHIFT_EXECUTION_SUMMARY.exists():
         raise FileNotFoundError(
             "Redshift execution summary was not generated: "
-            f"{PROJECT5_REDSHIFT_SUMMARY}"
+            f"{REDSHIFT_EXECUTION_SUMMARY}"
         )
 
     return {
-        "summary_file": str(PROJECT5_REDSHIFT_SUMMARY),
+        "summary_file": str(REDSHIFT_EXECUTION_SUMMARY),
         "generation_status": "passed",
         "stdout": result.stdout.strip(),
     }
 
 
 def validate_redshift_execution_summary() -> dict:
-    if not PROJECT5_REDSHIFT_SUMMARY.exists():
+    if not REDSHIFT_EXECUTION_SUMMARY.exists():
         raise FileNotFoundError(
             "Redshift execution summary not found: "
-            f"{PROJECT5_REDSHIFT_SUMMARY}"
+            f"{REDSHIFT_EXECUTION_SUMMARY}"
         )
 
-    with PROJECT5_REDSHIFT_SUMMARY.open(
+    with REDSHIFT_EXECUTION_SUMMARY.open(
         "r",
         encoding="utf-8",
     ) as file:
@@ -583,7 +587,7 @@ def validate_redshift_execution_summary() -> dict:
 
     return {
         "available": True,
-        "summary_file": str(PROJECT5_REDSHIFT_SUMMARY),
+        "summary_file": str(REDSHIFT_EXECUTION_SUMMARY),
         "execution_status": execution["status"],
         "runtime_seconds": execution["runtime_seconds"],
         "redshift": summary["redshift"],
@@ -603,13 +607,13 @@ def generate_orchestration_summary(**context) -> None:
         task_ids="validate_gold_outputs"
     )
     staging_validation = task_instance.xcom_pull(
-        task_ids="check_project3_streaming_staging"
+        task_ids="check_streaming_staging_ready"
     )
     deduplication_check = task_instance.xcom_pull(
         task_ids="run_downstream_deduplication_check"
     )
-    project5_readiness = task_instance.xcom_pull(
-        task_ids="check_project5_ready"
+    cloud_platform_readiness = task_instance.xcom_pull(
+        task_ids="check_cloud_platform_ready"
     )
     redshift_generation = task_instance.xcom_pull(
         task_ids="generate_redshift_execution_summary"
@@ -629,16 +633,16 @@ def generate_orchestration_summary(**context) -> None:
         "dag_id": "vendor_payments_data_platform_orchestration",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "batch_pipeline": {
-            "project1_status": "completed",
+            "batch_etl_status": "completed",
             "silver_validation": silver_validation,
             "gold_validation": gold_validation,
         },
         "streaming_pipeline": {
-            "project3_staging_validation": staging_validation,
+            "streaming_staging_validation": staging_validation,
             "downstream_deduplication_check": deduplication_check,
         },
         "cloud_pipeline": {
-            "project5_readiness": project5_readiness,
+            "cloud_platform_readiness": cloud_platform_readiness,
             "redshift_summary_generation": redshift_generation,
         },
         "redshift_pipeline": redshift_validation,
@@ -647,10 +651,9 @@ def generate_orchestration_summary(**context) -> None:
             "status": "PASS",
         },
         "design_note": (
-            "Airflow orchestrates Project 1 Batch ETL, validates "
-            "Project 3 streaming staging output, performs downstream "
-            "deduplication checks, and validates Project 5 Amazon "
-            "Redshift Serverless runtime metadata."
+            "Airflow orchestrates Batch ETL, validates streaming "
+            "staging output, performs downstream deduplication checks, "
+            "and validates Amazon Redshift Serverless runtime metadata."
         ),
     }
 
@@ -686,14 +689,14 @@ with DAG(
 ) as dag:
     start = EmptyOperator(task_id="start")
 
-    check_project1_ready_task = PythonOperator(
-        task_id="check_project1_ready",
-        python_callable=check_project1_ready,
+    check_batch_etl_ready_task = PythonOperator(
+        task_id="check_batch_etl_ready",
+        python_callable=check_batch_etl_ready,
     )
 
-    run_project1_pipeline_task = PythonOperator(
-        task_id="run_project1_pipeline",
-        python_callable=run_project1_pipeline,
+    run_batch_etl_pipeline_task = PythonOperator(
+        task_id="run_batch_etl_pipeline",
+        python_callable=run_batch_etl_pipeline,
     )
 
     validate_silver_output_task = PythonOperator(
@@ -706,9 +709,9 @@ with DAG(
         python_callable=validate_gold_outputs,
     )
 
-    check_project3_streaming_staging_task = PythonOperator(
-        task_id="check_project3_streaming_staging",
-        python_callable=check_project3_streaming_staging,
+    check_streaming_staging_ready_task = PythonOperator(
+        task_id="check_streaming_staging_ready",
+        python_callable=check_streaming_staging_ready,
     )
 
     run_downstream_deduplication_check_task = PythonOperator(
@@ -716,9 +719,9 @@ with DAG(
         python_callable=run_downstream_deduplication_check,
     )
 
-    check_project5_ready_task = PythonOperator(
-        task_id="check_project5_ready",
-        python_callable=check_project5_ready,
+    check_cloud_platform_ready_task = PythonOperator(
+        task_id="check_cloud_platform_ready",
+        python_callable=check_cloud_platform_ready,
     )
 
     generate_redshift_execution_summary_task = PythonOperator(
@@ -739,16 +742,16 @@ with DAG(
     end = EmptyOperator(task_id="end")
 
     (
-        start
-        >> check_project1_ready_task
-        >> run_project1_pipeline_task
-        >> validate_silver_output_task
-        >> validate_gold_outputs_task
-        >> check_project3_streaming_staging_task
-        >> run_downstream_deduplication_check_task
-        >> check_project5_ready_task
-        >> generate_redshift_execution_summary_task
-        >> validate_redshift_execution_summary_task
-        >> generate_orchestration_summary_task
-        >> end
+            start
+            >> check_batch_etl_ready_task
+            >> run_batch_etl_pipeline_task
+            >> validate_silver_output_task
+            >> validate_gold_outputs_task
+            >> check_streaming_staging_ready_task
+            >> run_downstream_deduplication_check_task
+            >> check_cloud_platform_ready_task
+            >> generate_redshift_execution_summary_task
+            >> validate_redshift_execution_summary_task
+            >> generate_orchestration_summary_task
+            >> end
     )

@@ -44,13 +44,13 @@ def test_vendor_payments_dag_has_expected_tasks() -> None:
 
     expected_tasks = {
         "start",
-        "check_project1_ready",
-        "run_project1_pipeline",
+        "check_batch_etl_ready",
+        "run_batch_etl_pipeline",
         "validate_silver_output",
         "validate_gold_outputs",
-        "check_project3_streaming_staging",
+        "check_streaming_staging_ready",
         "run_downstream_deduplication_check",
-        "check_project5_ready",
+        "check_cloud_platform_ready",
         "generate_redshift_execution_summary",
         "validate_redshift_execution_summary",
         "generate_orchestration_summary",
@@ -68,20 +68,20 @@ def test_vendor_payments_dag_task_dependencies() -> None:
     assert dag is not None, f"{DAG_ID} DAG was not loaded"
 
     expected_dependencies = {
-        "start": {"check_project1_ready"},
-        "check_project1_ready": {"run_project1_pipeline"},
-        "run_project1_pipeline": {"validate_silver_output"},
+        "start": {"check_batch_etl_ready"},
+        "check_batch_etl_ready": {"run_batch_etl_pipeline"},
+        "run_batch_etl_pipeline": {"validate_silver_output"},
         "validate_silver_output": {"validate_gold_outputs"},
         "validate_gold_outputs": {
-            "check_project3_streaming_staging"
+            "check_streaming_staging_ready"
         },
-        "check_project3_streaming_staging": {
+        "check_streaming_staging_ready": {
             "run_downstream_deduplication_check"
         },
         "run_downstream_deduplication_check": {
-            "check_project5_ready"
+            "check_cloud_platform_ready"
         },
-        "check_project5_ready": {
+        "check_cloud_platform_ready": {
             "generate_redshift_execution_summary"
         },
         "generate_redshift_execution_summary": {
@@ -127,7 +127,7 @@ def test_redshift_tasks_exist_in_dependency_order() -> None:
 
     assert dag is not None, f"{DAG_ID} DAG was not loaded"
 
-    check_project5_task = dag.get_task("check_project5_ready")
+    check_cloud_platform_task = dag.get_task("check_cloud_platform_ready")
     generate_summary_task = dag.get_task(
         "generate_redshift_execution_summary"
     )
@@ -138,7 +138,7 @@ def test_redshift_tasks_exist_in_dependency_order() -> None:
         "generate_orchestration_summary"
     )
 
-    assert check_project5_task.downstream_task_ids == {
+    assert check_cloud_platform_task.downstream_task_ids == {
         "generate_redshift_execution_summary"
     }
 
