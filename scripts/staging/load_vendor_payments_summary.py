@@ -33,7 +33,7 @@ def load_vendor_payments_summary() -> str:
     """
 
     logger.info(
-        "Start load_staging_sales_summary"
+        "Starting vendor payments summary load"
     )
 
     if not INPUT_FILE.exists():
@@ -43,21 +43,19 @@ def load_vendor_payments_summary() -> str:
 
     df = pd.read_csv(INPUT_FILE)
 
-    expected_columns = {
+    required_columns = {
         "department",
         "payment_amount",
         "business_composite_key",
         "event_id",
     }
 
-    missing_expected = (
-        expected_columns - set(df.columns)
-    )
+    missing_columns = required_columns - set(df.columns)
 
-    if missing_expected:
+    if missing_columns:
         raise ValueError(
             "Schema mismatch. Missing columns: "
-            f"{sorted(missing_expected)}"
+            f"{sorted(missing_columns)}"
         )
 
     if df.empty:
@@ -114,7 +112,7 @@ def load_vendor_payments_summary() -> str:
     )
 
     logger.info(
-        f"Loaded {len(df)} rows into warehouse"
+        f"Loaded {len(summary)} summary rows into warehouse"
     )
 
     s3_bucket = (

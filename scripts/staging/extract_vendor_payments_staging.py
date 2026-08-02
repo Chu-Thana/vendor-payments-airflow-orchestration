@@ -36,7 +36,6 @@ def extract_vendor_payments_staging() -> str:
 
     with open(STAGING_FILE, "r", encoding="utf-8-sig", errors="replace") as f:
         for raw_line in f:
-            logger.info(f"RAW LINE repr: {raw_line!r}")  # debug ชั่วคราว
 
             line = raw_line.strip()
             if not line:
