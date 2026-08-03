@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 
 from airflow import DAG
@@ -9,8 +10,10 @@ except ImportError:
     from airflow.operators.bash import BashOperator
     from airflow.operators.empty import EmptyOperator
 
-BATCH_ETL_PATH = "/opt/airflow/vendor_payments_batch_etl"
-
+BATCH_ETL_PATH = os.getenv(
+    "VENDOR_BATCH_ETL_CONTAINER_PATH",
+    "/opt/airflow/vendor_payments_batch_etl",
+)
 
 default_args = {
     "owner": "airflow",
@@ -32,7 +35,7 @@ with DAG(
     check_batch_etl_source = BashOperator(
         task_id="check_batch_etl_source",
         bash_command=(
-            f"test -f "
+            f"test -s "
             f"{BATCH_ETL_PATH}/scripts/pipeline/run_pipeline.py"
         ),
     )
@@ -62,28 +65,29 @@ with DAG(
     check_silver_output = BashOperator(
         task_id="check_silver_output",
         bash_command=(
-            f"test -f "
+            f"test -s "
             f"{BATCH_ETL_PATH}/data/processed/silver/"
-            "vendor_payments_silver_sample.csv"
+            "vendor_payments_silver_sample.csv "
+            '&& echo "Silver output validation passed"'
         ),
     )
 
     check_gold_outputs = BashOperator(
         task_id="check_gold_outputs",
         bash_command=(
-            f"test -f "
+            f"test -s "
             f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
             "mart_spending_by_fiscal_year.csv && "
-            f"test -f "
+            f"test -s "
             f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
             "mart_spending_by_department.csv && "
-            f"test -f "
+            f"test -s "
             f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
             "mart_spending_by_supplier_top_n.csv && "
-            f"test -f "
+            f"test -s "
             f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
             "mart_pending_by_department.csv && "
-            f"test -f "
+            f"test -s "
             f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
             "mart_fund_category_summary.csv"
         ),
