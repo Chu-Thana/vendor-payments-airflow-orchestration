@@ -38,6 +38,7 @@ REDSHIFT_VALIDATE_BATCH_ANALYTICS_SQL = CLOUD_PLATFORM_ROOT / "sql" / "redshift"
 STREAMING_STAGING_OUTPUT = STREAMING_PIPELINE_ROOT / "output/staging/vendor_payments_streaming_staging.jsonl"
 STREAMING_CURATED_CONVERTER_SCRIPT = CLOUD_PLATFORM_ROOT/ "scripts"/ "streaming" / "convert_streaming_jsonl_to_csv.py"
 STREAMING_CURATED_UPLOAD_SCRIPT = CLOUD_PLATFORM_ROOT/ "scripts" / "streaming"  / "upload_streaming_curated_to_s3.py"
+STREAMING_REPORTS_UPLOAD_SCRIPT = CLOUD_PLATFORM_ROOT/ "scripts"/ "streaming"/ "upload_streaming_reports_to_s3.py"
 
 REDSHIFT_CREATE_STREAMING_LANDING_TABLE_SQL = CLOUD_PLATFORM_ROOT / "sql" / "redshift" / "06_create_streaming_landing_table.sql"
 REDSHIFT_COPY_STREAMING_CURATED_SQL = CLOUD_PLATFORM_ROOT/ "sql"/ "redshift"/ "07_copy_streaming_curated_from_s3.sql"
@@ -920,6 +921,42 @@ def generate_orchestration_summary(**context) -> None:
         )
 
 
+def upload_streaming_reports_to_s3() -> dict:
+    result = subprocess.run(
+        [
+            "python",
+            str(STREAMING_REPORTS_UPLOAD_SCRIPT),
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+            "STREAMING_PIPELINE_ROOT": str(
+                STREAMING_PIPELINE_ROOT
+            ),
+            "ORCHESTRATION_OUTPUT_ROOT": str(
+                ORCHESTRATION_OUTPUT_ROOT
+            ),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Streaming reports upload to S3 failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    return {
+        "streaming_reports_upload_status": "passed",
+        "stdout": result.stdout.strip(),
+    }
+
+
 with DAG(
     dag_id="vendor_payments_data_platform_orchestration",
     description=(
@@ -1051,6 +1088,11 @@ with DAG(
         python_callable=generate_orchestration_summary,
     )
 
+    upload_streaming_reports_to_s3_task = PythonOperator(
+        task_id="upload_streaming_reports_to_s3",
+        python_callable=upload_streaming_reports_to_s3,
+    )
+
     end = EmptyOperator(task_id="end")
 
     (
@@ -1093,5 +1135,6 @@ with DAG(
             generate_redshift_execution_summary_task
             >> validate_redshift_execution_summary_task
             >> generate_orchestration_summary_task
+            >> upload_streaming_reports_to_s3_task
             >> end
     )
