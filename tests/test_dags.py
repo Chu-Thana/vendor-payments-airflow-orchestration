@@ -48,9 +48,22 @@ def test_vendor_payments_dag_has_expected_tasks() -> None:
         "run_batch_etl_pipeline",
         "validate_silver_output",
         "validate_gold_outputs",
+        "upload_batch_gold_to_s3",
         "check_streaming_staging_ready",
         "run_downstream_deduplication_check",
+        "convert_streaming_jsonl_to_csv",
+        "upload_streaming_curated_to_s3",
+        "upload_streaming_reports_to_s3",
         "check_cloud_platform_ready",
+        "redshift_create_schemas",
+        "redshift_create_batch_landing_tables",
+        "redshift_copy_batch_gold_from_s3",
+        "redshift_create_batch_analytics_views",
+        "redshift_validate_batch_analytics",
+        "redshift_create_streaming_landing_table",
+        "redshift_copy_streaming_curated_from_s3",
+        "redshift_create_streaming_analytics_views",
+        "redshift_validate_streaming_analytics",
         "generate_redshift_execution_summary",
         "validate_redshift_execution_summary",
         "generate_orchestration_summary",
@@ -58,7 +71,7 @@ def test_vendor_payments_dag_has_expected_tasks() -> None:
     }
 
     assert set(dag.task_ids) == expected_tasks
-    assert len(dag.task_ids) == 12
+    assert len(dag.task_ids) == 25
 
 
 def test_vendor_payments_dag_task_dependencies() -> None:
@@ -72,25 +85,63 @@ def test_vendor_payments_dag_task_dependencies() -> None:
         "check_batch_etl_ready": {"run_batch_etl_pipeline"},
         "run_batch_etl_pipeline": {"validate_silver_output"},
         "validate_silver_output": {"validate_gold_outputs"},
-        "validate_gold_outputs": {
-            "check_streaming_staging_ready"
-        },
+        "validate_gold_outputs": {"upload_batch_gold_to_s3"},
+        "upload_batch_gold_to_s3": {"check_streaming_staging_ready"},
         "check_streaming_staging_ready": {
             "run_downstream_deduplication_check"
         },
         "run_downstream_deduplication_check": {
+            "convert_streaming_jsonl_to_csv"
+        },
+        "convert_streaming_jsonl_to_csv": {
+            "upload_streaming_curated_to_s3"
+        },
+        "upload_streaming_curated_to_s3": {
             "check_cloud_platform_ready"
         },
-        "check_cloud_platform_ready": {
+        "check_cloud_platform_ready": {"redshift_create_schemas"},
+
+        "redshift_create_schemas": {
+            "redshift_create_batch_landing_tables",
+            "redshift_create_streaming_landing_table",
+        },
+
+        "redshift_create_batch_landing_tables": {
+            "redshift_copy_batch_gold_from_s3"
+        },
+        "redshift_copy_batch_gold_from_s3": {
+            "redshift_create_batch_analytics_views"
+        },
+        "redshift_create_batch_analytics_views": {
+            "redshift_validate_batch_analytics"
+        },
+        "redshift_validate_batch_analytics": {
             "generate_redshift_execution_summary"
         },
+
+        "redshift_create_streaming_landing_table": {
+            "redshift_copy_streaming_curated_from_s3"
+        },
+        "redshift_copy_streaming_curated_from_s3": {
+            "redshift_create_streaming_analytics_views"
+        },
+        "redshift_create_streaming_analytics_views": {
+            "redshift_validate_streaming_analytics"
+        },
+        "redshift_validate_streaming_analytics": {
+            "generate_redshift_execution_summary"
+        },
+
         "generate_redshift_execution_summary": {
             "validate_redshift_execution_summary"
         },
         "validate_redshift_execution_summary": {
             "generate_orchestration_summary"
         },
-        "generate_orchestration_summary": {"end"},
+        "generate_orchestration_summary": {
+            "upload_streaming_reports_to_s3"
+        },
+        "upload_streaming_reports_to_s3": {"end"},
         "end": set(),
     }
 
@@ -127,7 +178,18 @@ def test_redshift_tasks_exist_in_dependency_order() -> None:
 
     assert dag is not None, f"{DAG_ID} DAG was not loaded"
 
-    check_cloud_platform_task = dag.get_task("check_cloud_platform_ready")
+    check_cloud_platform_task = dag.get_task(
+        "check_cloud_platform_ready"
+    )
+    create_schemas_task = dag.get_task(
+        "redshift_create_schemas"
+    )
+    batch_validation_task = dag.get_task(
+        "redshift_validate_batch_analytics"
+    )
+    streaming_validation_task = dag.get_task(
+        "redshift_validate_streaming_analytics"
+    )
     generate_summary_task = dag.get_task(
         "generate_redshift_execution_summary"
     )
@@ -139,7 +201,25 @@ def test_redshift_tasks_exist_in_dependency_order() -> None:
     )
 
     assert check_cloud_platform_task.downstream_task_ids == {
+        "redshift_create_schemas"
+    }
+
+    assert create_schemas_task.downstream_task_ids == {
+        "redshift_create_batch_landing_tables",
+        "redshift_create_streaming_landing_table",
+    }
+
+    assert batch_validation_task.downstream_task_ids == {
         "generate_redshift_execution_summary"
+    }
+
+    assert streaming_validation_task.downstream_task_ids == {
+        "generate_redshift_execution_summary"
+    }
+
+    assert generate_summary_task.upstream_task_ids == {
+        "redshift_validate_batch_analytics",
+        "redshift_validate_streaming_analytics",
     }
 
     assert generate_summary_task.downstream_task_ids == {
