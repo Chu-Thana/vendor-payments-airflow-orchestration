@@ -12,7 +12,6 @@ DAG_ID = "vendor_payments_data_platform_orchestration"
 def load_dag_bag() -> DagBag:
     return DagBag(
         dag_folder=str(DAGS_DIR),
-        include_examples=False,
     )
 
 
