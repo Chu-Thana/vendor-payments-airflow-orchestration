@@ -1,4 +1,4 @@
-name: CI - Project 4 Airflow DAG Validation
+name: CI - Vendor Payments Airflow Orchestration
 
 on:
   push:
