@@ -13,37 +13,48 @@ BASE_PATH = os.getenv(
     "/opt/airflow",
 )
 
-INPUT_FILE = (
-    Path(BASE_PATH)
-    / "data/processed/vendor_payments_streaming_cleaned.csv"
-)
-
-OUTPUT_FILE = (
-    Path(BASE_PATH)
-    / "data/warehouse/vendor_payments_summary_by_department.csv"
-)
-
 logger = logging.getLogger(__name__)
 
 
-def load_vendor_payments_summary() -> str:
+def load_vendor_payments_summary(
+    input_file: str,
+    window_id: str,
+) -> str:
     """
     Aggregate cleaned vendor payment events into a
     warehouse-ready department summary.
     """
 
+    input_path = Path(input_file)
+
+    output_file = (
+            Path(BASE_PATH)
+            / "data"
+            / "warehouse"
+            / window_id
+            / "vendor_payments_summary_by_department.csv"
+    )
+
+    s3_bucket = "sales-analytics-lakehouse-thana"
+
+    s3_key = (
+        f"gold/streaming/{window_id}/"
+        "vendor_payments_summary_by_department.csv"
+    )
+
     logger.info(
         "Starting vendor payments summary load"
     )
 
-    if not INPUT_FILE.exists():
+    if not input_path.exists():
         raise FileNotFoundError(
-            f"Input file not found: {INPUT_FILE}"
+            f"Input file not found: {input_path}"
         )
 
-    df = pd.read_csv(INPUT_FILE)
+    df = pd.read_csv(input_path)
 
     required_columns = {
+        "window_id",
         "department",
         "payment_amount",
         "business_composite_key",
@@ -101,13 +112,13 @@ def load_vendor_payments_summary() -> str:
         f"Output summary rows: {len(summary)}"
     )
 
-    OUTPUT_FILE.parent.mkdir(
+    output_file.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
     summary.to_csv(
-        OUTPUT_FILE,
+        output_file,
         index=False,
     )
 
@@ -124,12 +135,12 @@ def load_vendor_payments_summary() -> str:
     )
 
     upload_to_s3(
-        str(OUTPUT_FILE),
+        str(output_file),
         s3_bucket,
         s3_key,
     )
 
-    return str(OUTPUT_FILE)
+    return str(output_file)
 
 
 def upload_to_s3(
@@ -149,7 +160,3 @@ def upload_to_s3(
         f"Uploaded {local_path} "
         f"to s3://{bucket}/{key}"
     )
-
-
-if __name__ == "__main__":
-    load_vendor_payments_summary()
