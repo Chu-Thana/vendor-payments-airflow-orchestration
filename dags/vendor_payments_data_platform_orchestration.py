@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from airflow import DAG
+from airflow.models.dagrun import DagRun
+from airflow.utils.session import provide_session
+from sqlalchemy import select
 
 try:
     from airflow.providers.standard.operators.empty import EmptyOperator
@@ -17,281 +20,74 @@ except ImportError:
     from airflow.operators.python import PythonOperator
 
 
-BATCH_ETL_ROOT = Path("/opt/airflow/vendor_payments_batch_etl")
+BATCH_PIPELINE_DAG_ID = ("vendor_payments_batch_pipeline")
+STREAMING_PIPELINE_DAG_ID = ("vendor_payments_streaming_pipeline")
+
 STREAMING_PIPELINE_ROOT = Path("/opt/airflow/vendor_payments_streaming")
 CLOUD_PLATFORM_ROOT = Path("/opt/airflow/vendor_payments_cloud_platform")
 ORCHESTRATION_OUTPUT_ROOT = Path("/opt/airflow/output")
-
-BATCH_ETL_PIPELINE_SCRIPT = BATCH_ETL_ROOT / "scripts/pipeline/run_pipeline.py"
-SILVER_OUTPUT = BATCH_ETL_ROOT / "data/processed/silver/vendor_payments_silver.csv"
-GOLD_OUTPUT_DIR = BATCH_ETL_ROOT / "data/processed/gold"
-
-BATCH_GOLD_UPLOAD_SCRIPT = CLOUD_PLATFORM_ROOT/ "scripts"/ "batch"/ "upload_full_gold_to_s3.py"
-
-REDSHIFT_SQL_RUNNER = CLOUD_PLATFORM_ROOT / "scripts" / "warehouse" / "run_redshift_sql.py"
-REDSHIFT_CREATE_SCHEMAS_SQL = CLOUD_PLATFORM_ROOT/ "sql"/ "redshift"/ "01_create_schemas.sql"
-REDSHIFT_CREATE_BATCH_TABLES_SQL = CLOUD_PLATFORM_ROOT/ "sql"/ "redshift"/ "02_create_batch_landing_tables.sql"
-REDSHIFT_COPY_BATCH_GOLD_SQL = CLOUD_PLATFORM_ROOT/ "sql"/ "redshift"/ "03_copy_batch_gold_from_s3.sql"
-REDSHIFT_CREATE_BATCH_ANALYTICS_VIEWS_SQL = CLOUD_PLATFORM_ROOT/ "sql"/ "redshift"/ "04_create_batch_analytics_views.sql"
-REDSHIFT_VALIDATE_BATCH_ANALYTICS_SQL = CLOUD_PLATFORM_ROOT / "sql" / "redshift" / "05_validate_batch_analytics.sql"
-
-STREAMING_STAGING_OUTPUT = STREAMING_PIPELINE_ROOT / "output/staging/vendor_payments_streaming_staging.jsonl"
-STREAMING_CURATED_CONVERTER_SCRIPT = CLOUD_PLATFORM_ROOT/ "scripts"/ "streaming" / "convert_streaming_jsonl_to_csv.py"
-STREAMING_CURATED_UPLOAD_SCRIPT = CLOUD_PLATFORM_ROOT/ "scripts" / "streaming"  / "upload_streaming_curated_to_s3.py"
-STREAMING_REPORTS_UPLOAD_SCRIPT = CLOUD_PLATFORM_ROOT/ "scripts"/ "streaming"/ "upload_streaming_reports_to_s3.py"
-
-REDSHIFT_CREATE_STREAMING_LANDING_TABLE_SQL = CLOUD_PLATFORM_ROOT / "sql" / "redshift" / "06_create_streaming_landing_table.sql"
-REDSHIFT_COPY_STREAMING_CURATED_SQL = CLOUD_PLATFORM_ROOT/ "sql"/ "redshift"/ "07_copy_streaming_curated_from_s3.sql"
-REDSHIFT_CREATE_STREAMING_ANALYTICS_VIEWS_SQL = CLOUD_PLATFORM_ROOT / "sql" / "redshift" / "08_create_streaming_analytics_views.sql"
-REDSHIFT_VALIDATE_STREAMING_ANALYTICS_SQL = CLOUD_PLATFORM_ROOT/ "sql"/ "redshift"/ "09_validate_streaming_analytics.sql"
-
 
 REDSHIFT_SUMMARY_SCRIPT = CLOUD_PLATFORM_ROOT / "scripts/warehouse/generate_redshift_summary.py"
 REDSHIFT_EXECUTION_SUMMARY =  CLOUD_PLATFORM_ROOT / "output/reports/redshift_execution_summary.json"
 ORCHESTRATION_SUMMARY =  ORCHESTRATION_OUTPUT_ROOT / "reports/airflow_orchestration_summary.json"
 
-def check_batch_etl_ready() -> None:
-    if not BATCH_ETL_ROOT.exists():
-        raise FileNotFoundError(f"Batch ETL root not found: {BATCH_ETL_ROOT}")
 
-    if not BATCH_ETL_PIPELINE_SCRIPT.exists():
-        raise FileNotFoundError(
-            f"Batch ETL pipeline script not found: {BATCH_ETL_PIPELINE_SCRIPT}"
-        )
+@provide_session
+def check_pipeline_status(
+    dag_id: str,
+    session=None,
+) -> dict:
+    """Return the latest Airflow run status for one pipeline."""
 
-
-def run_batch_etl_pipeline() -> None:
-    result = subprocess.run(
-        ["python", "-m", "scripts.pipeline.run_pipeline"],
-        cwd=str(BATCH_ETL_ROOT),
-        env={
-            **os.environ,
-            "PYTHONPATH": str(BATCH_ETL_ROOT),
-        },
-        check=False,
-        capture_output=True,
-        text=True,
+    latest_run = session.scalar(
+        select(DagRun)
+        .where(DagRun.dag_id == dag_id)
+        .order_by(DagRun.logical_date.desc())
+        .limit(1)
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Batch ETL pipeline failed.\n"
-            f"RETURN CODE: {result.returncode}\n"
-            f"STDOUT:\n{result.stdout}\n"
-            f"STDERR:\n{result.stderr}"
+    if latest_run is None:
+        raise FileNotFoundError(
+            f"No Airflow DAG run found for: {dag_id}"
         )
 
-
-
-def validate_silver_output() -> dict:
-    if not SILVER_OUTPUT.exists():
-        raise FileNotFoundError(f"Silver output not found: {SILVER_OUTPUT}")
-
-    file_size_bytes = SILVER_OUTPUT.stat().st_size
-
-    if file_size_bytes == 0:
-        raise ValueError(f"Silver output is empty: {SILVER_OUTPUT}")
-
-    return {
-        "silver_output": str(SILVER_OUTPUT),
-        "silver_file_size_bytes": file_size_bytes,
-        "silver_validation_status": "passed",
-    }
-
-
-def validate_gold_outputs() -> dict:
-    if not GOLD_OUTPUT_DIR.exists():
-        raise FileNotFoundError(f"Gold output directory not found: {GOLD_OUTPUT_DIR}")
-
-    gold_files = sorted(GOLD_OUTPUT_DIR.glob("*.csv"))
-
-    if not gold_files:
-        raise FileNotFoundError(f"No gold CSV files found in: {GOLD_OUTPUT_DIR}")
-
-    gold_summary = {
-        gold_file.name: gold_file.stat().st_size
-        for gold_file in gold_files
-    }
-
-    empty_files = [
-        file_name
-        for file_name, file_size in gold_summary.items()
-        if file_size == 0
-    ]
-
-    if empty_files:
-        raise ValueError(f"Empty gold output files found: {empty_files}")
-
-    return {
-        "gold_output_dir": str(GOLD_OUTPUT_DIR),
-        "gold_files": gold_summary,
-        "gold_validation_status": "passed",
-    }
-
-
-def upload_batch_gold_to_s3() -> dict:
-    result = subprocess.run(
-        [
-            "python",
-            str(BATCH_GOLD_UPLOAD_SCRIPT),
-        ],
-        cwd=str(CLOUD_PLATFORM_ROOT),
-        env={
-            **os.environ,
-            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
-            "VENDOR_BATCH_ETL_CONTAINER_PATH": str(BATCH_ETL_ROOT),
-            "S3_BUCKET": os.environ["S3_BUCKET"],
-            "S3_PREFIX": os.environ["S3_PREFIX"],
-        },
-        check=False,
-        capture_output=True,
-        text=True,
+    run_state = enum_value(
+        latest_run.state
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Batch Gold upload to S3 failed.\n"
-            f"RETURN CODE: {result.returncode}\n"
-            f"STDOUT:\n{result.stdout}\n"
-            f"STDERR:\n{result.stderr}"
-        )
-
-    return {
-        "upload_status": "passed",
-        "stdout": result.stdout.strip(),
-    }
-
-def check_streaming_staging_ready() -> dict:
-    if not STREAMING_STAGING_OUTPUT.exists():
-        raise FileNotFoundError(
-            "Streaming staging output not found: "
-            f"{STREAMING_STAGING_OUTPUT}"
-        )
-
-    file_size_bytes = STREAMING_STAGING_OUTPUT.stat().st_size
-
-    if file_size_bytes == 0:
+    if run_state != "success":
         raise ValueError(
-            "Streaming staging output is empty: "
-            f"{STREAMING_STAGING_OUTPUT}"
+            f"Latest DAG run is not successful: "
+            f"dag_id={dag_id} state={run_state}"
         )
 
     return {
-        "streaming_staging_output": str(
-            STREAMING_STAGING_OUTPUT
+        "dag_id": dag_id,
+        "run_id": latest_run.run_id,
+        "state": run_state,
+        "logical_date": serialize_datetime(
+            latest_run.logical_date
         ),
-        "streaming_staging_file_size_bytes": file_size_bytes,
-        "streaming_staging_status": "passed",
+        "started_at": serialize_datetime(
+            latest_run.start_date
+        ),
+        "completed_at": serialize_datetime(
+            latest_run.end_date
+        ),
+        "status": "ready",
     }
 
 
-def run_downstream_deduplication_check() -> dict:
-    total_records = 0
-    event_ids: set[str] = set()
-    duplicate_event_ids = 0
-    missing_event_ids = 0
-
-    with STREAMING_STAGING_OUTPUT.open("r", encoding="utf-8") as file:
-        for line in file:
-            if not line.strip():
-                continue
-
-            record = json.loads(line)
-            total_records += 1
-
-            event_id = record.get("event_id")
-
-            if not event_id:
-                missing_event_ids += 1
-                continue
-
-            if event_id in event_ids:
-                duplicate_event_ids += 1
-            else:
-                event_ids.add(event_id)
-
-    if total_records == 0:
-        raise ValueError("Streaming staging output contains zero records.")
-
-    return {
-        "total_staging_records": total_records,
-        "unique_event_ids": len(event_ids),
-        "duplicate_event_ids": duplicate_event_ids,
-        "missing_event_ids": missing_event_ids,
-        "downstream_deduplication_status": (
-            "passed"
-            if duplicate_event_ids == 0
-            else "duplicates_detected"
-        ),
-        "deduplication_layer": "airflow_downstream_validation",
-        "principle": (
-            "Prevent data loss first, "
-            "then handle duplicates downstream."
-        ),
-    }
-
-
-def convert_streaming_jsonl_to_csv() -> dict:
-    result = subprocess.run(
-        [
-            "python",
-            str(STREAMING_CURATED_CONVERTER_SCRIPT),
-        ],
-        cwd=str(CLOUD_PLATFORM_ROOT),
-        env={
-            **os.environ,
-            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
-            "VENDOR_STREAMING_CONTAINER_PATH": str(
-                STREAMING_PIPELINE_ROOT
-            ),
-        },
-        check=False,
-        capture_output=True,
-        text=True,
+def check_batch_pipeline_status() -> dict:
+    return check_pipeline_status(
+        BATCH_PIPELINE_DAG_ID
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Streaming JSONL to CSV conversion failed.\n"
-            f"RETURN CODE: {result.returncode}\n"
-            f"STDOUT:\n{result.stdout}\n"
-            f"STDERR:\n{result.stderr}"
-        )
 
-    return {
-        "streaming_curated_conversion_status": "passed",
-        "stdout": result.stdout.strip(),
-    }
-
-
-def upload_streaming_curated_to_s3() -> dict:
-    result = subprocess.run(
-        [
-            "python",
-            str(STREAMING_CURATED_UPLOAD_SCRIPT),
-        ],
-        cwd=str(CLOUD_PLATFORM_ROOT),
-        env={
-            **os.environ,
-            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
-        },
-        check=False,
-        capture_output=True,
-        text=True,
+def check_streaming_pipeline_status() -> dict:
+    return check_pipeline_status(
+        STREAMING_PIPELINE_DAG_ID
     )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Streaming curated upload to S3 failed.\n"
-            f"RETURN CODE: {result.returncode}\n"
-            f"STDOUT:\n{result.stdout}\n"
-            f"STDERR:\n{result.stderr}"
-        )
-
-    return {
-        "streaming_curated_upload_status": "passed",
-        "stdout": result.stdout.strip(),
-    }
 
 
 def check_cloud_platform_ready() -> dict:
@@ -313,161 +109,6 @@ def check_cloud_platform_ready() -> dict:
         ),
         "cloud_platform_readiness_status": "passed",
     }
-
-def run_redshift_sql_task(
-    sql_file: Path,
-    failure_message: str,
-    status_key: str,
-) -> dict:
-    result = subprocess.run(
-        [
-            "python",
-            str(REDSHIFT_SQL_RUNNER),
-            str(sql_file),
-        ],
-        cwd=str(CLOUD_PLATFORM_ROOT),
-        env={
-            **os.environ,
-            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
-        },
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"{failure_message}\n"
-            f"RETURN CODE: {result.returncode}\n"
-            f"STDOUT:\n{result.stdout}\n"
-            f"STDERR:\n{result.stderr}"
-        )
-
-    return {
-        status_key: "passed",
-        "sql_file": str(sql_file),
-        "stdout": result.stdout.strip(),
-    }
-
-
-def redshift_create_schemas() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_CREATE_SCHEMAS_SQL,
-        failure_message=(
-            "Redshift schema creation failed."
-        ),
-        status_key=(
-            "redshift_schema_creation_status"
-        ),
-    )
-
-
-def redshift_create_batch_landing_tables() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_CREATE_BATCH_TABLES_SQL,
-        failure_message=(
-            "Redshift Batch landing table "
-            "creation failed."
-        ),
-        status_key=(
-            "redshift_batch_landing_table_"
-            "creation_status"
-        ),
-    )
-
-
-def redshift_copy_batch_gold_from_s3() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_COPY_BATCH_GOLD_SQL,
-        failure_message=(
-            "Redshift Batch Gold COPY "
-            "from S3 failed."
-        ),
-        status_key=(
-            "redshift_batch_gold_copy_status"
-        ),
-    )
-
-
-def redshift_create_batch_analytics_views() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_CREATE_BATCH_ANALYTICS_VIEWS_SQL,
-        failure_message=(
-            "Redshift Batch analytics view "
-            "creation failed."
-        ),
-        status_key=(
-            "redshift_batch_analytics_view_"
-            "creation_status"
-        ),
-    )
-
-
-def redshift_validate_batch_analytics() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_VALIDATE_BATCH_ANALYTICS_SQL,
-        failure_message=(
-            "Redshift Batch analytics validation "
-            "query failed."
-        ),
-        status_key=(
-            "redshift_batch_analytics_validation_status"
-        ),
-    )
-
-
-def redshift_create_streaming_landing_table() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_CREATE_STREAMING_LANDING_TABLE_SQL,
-        failure_message=(
-            "Redshift Streaming landing table "
-            "creation failed."
-        ),
-        status_key=(
-            "redshift_streaming_landing_table_"
-            "creation_status"
-        ),
-    )
-
-
-def redshift_copy_streaming_curated_from_s3() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_COPY_STREAMING_CURATED_SQL,
-        failure_message=(
-            "Redshift Streaming curated COPY "
-            "from S3 failed."
-        ),
-        status_key=(
-            "redshift_streaming_curated_copy_status"
-        ),
-    )
-
-
-def redshift_create_streaming_analytics_views() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_CREATE_STREAMING_ANALYTICS_VIEWS_SQL,
-        failure_message=(
-            "Redshift Streaming analytics view "
-            "creation failed."
-        ),
-        status_key=(
-            "redshift_streaming_analytics_view_"
-            "creation_status"
-        ),
-    )
-
-
-def redshift_validate_streaming_analytics() -> dict:
-    return run_redshift_sql_task(
-        sql_file=REDSHIFT_VALIDATE_STREAMING_ANALYTICS_SQL,
-        failure_message=(
-            "Redshift Streaming analytics validation "
-            "query failed."
-        ),
-        status_key=(
-            "redshift_streaming_analytics_validation_status"
-        ),
-    )
 
 
 def serialize_datetime(value: Any) -> str | None:
@@ -853,24 +494,22 @@ def validate_redshift_execution_summary() -> dict:
 def generate_orchestration_summary(**context) -> None:
     task_instance = context["ti"]
 
-    silver_validation = task_instance.xcom_pull(
-        task_ids="validate_silver_output"
+    batch_pipeline_status = task_instance.xcom_pull(
+        task_ids="check_batch_pipeline_status"
     )
-    gold_validation = task_instance.xcom_pull(
-        task_ids="validate_gold_outputs"
+
+    streaming_pipeline_status = task_instance.xcom_pull(
+        task_ids="check_streaming_pipeline_status"
     )
-    staging_validation = task_instance.xcom_pull(
-        task_ids="check_streaming_staging_ready"
-    )
-    deduplication_check = task_instance.xcom_pull(
-        task_ids="run_downstream_deduplication_check"
-    )
+
     cloud_platform_readiness = task_instance.xcom_pull(
         task_ids="check_cloud_platform_ready"
     )
+
     redshift_generation = task_instance.xcom_pull(
         task_ids="generate_redshift_execution_summary"
     )
+
     redshift_validation = task_instance.xcom_pull(
         task_ids="validate_redshift_execution_summary"
     )
@@ -881,32 +520,33 @@ def generate_orchestration_summary(**context) -> None:
     )
 
     summary = {
-        "project": "Vendor Payments Airflow Orchestration",
-        "pipeline_version": "1.0.0",
+        "project": "Vendor Payments Data Platform",
+        "pipeline_version": "2.0.0",
         "dag_id": "vendor_payments_data_platform_orchestration",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "batch_pipeline": {
-            "batch_etl_status": "completed",
-            "silver_validation": silver_validation,
-            "gold_validation": gold_validation,
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "batch_pipeline": batch_pipeline_status,
+        "streaming_pipeline": streaming_pipeline_status,
+        "platform_pipeline": {
+            "cloud_platform_readiness": (
+                cloud_platform_readiness
+            ),
+            "redshift_summary_generation": (
+                redshift_generation
+            ),
+            "redshift_validation": (
+                redshift_validation
+            ),
         },
-        "streaming_pipeline": {
-            "streaming_staging_validation": staging_validation,
-            "downstream_deduplication_check": deduplication_check,
-        },
-        "cloud_pipeline": {
-            "cloud_platform_readiness": cloud_platform_readiness,
-            "redshift_summary_generation": redshift_generation,
-        },
-        "redshift_pipeline": redshift_validation,
         "orchestration_status": "completed",
         "validation": {
             "status": "PASS",
         },
         "design_note": (
-            "Airflow orchestrates Batch ETL, validates streaming "
-            "staging output, performs downstream deduplication checks, "
-            "and validates Amazon Redshift Serverless runtime metadata."
+            "Batch and Streaming workloads run as independent "
+            "Airflow lifecycles. This DAG validates the latest "
+            "successful pipeline runs and platform-level metadata."
         ),
     }
 
@@ -919,42 +559,6 @@ def generate_orchestration_summary(**context) -> None:
             file,
             indent=2,
         )
-
-
-def upload_streaming_reports_to_s3() -> dict:
-    result = subprocess.run(
-        [
-            "python",
-            str(STREAMING_REPORTS_UPLOAD_SCRIPT),
-        ],
-        cwd=str(CLOUD_PLATFORM_ROOT),
-        env={
-            **os.environ,
-            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
-            "STREAMING_PIPELINE_ROOT": str(
-                STREAMING_PIPELINE_ROOT
-            ),
-            "ORCHESTRATION_OUTPUT_ROOT": str(
-                ORCHESTRATION_OUTPUT_ROOT
-            ),
-        },
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Streaming reports upload to S3 failed.\n"
-            f"RETURN CODE: {result.returncode}\n"
-            f"STDOUT:\n{result.stdout}\n"
-            f"STDERR:\n{result.stderr}"
-        )
-
-    return {
-        "streaming_reports_upload_status": "passed",
-        "stdout": result.stdout.strip(),
-    }
 
 
 with DAG(
@@ -976,101 +580,13 @@ with DAG(
         "orchestration",
     ],
 ) as dag:
-    start = EmptyOperator(task_id="start")
-
-    check_batch_etl_ready_task = PythonOperator(
-        task_id="check_batch_etl_ready",
-        python_callable=check_batch_etl_ready,
-    )
-
-    run_batch_etl_pipeline_task = PythonOperator(
-        task_id="run_batch_etl_pipeline",
-        python_callable=run_batch_etl_pipeline,
-    )
-
-    validate_silver_output_task = PythonOperator(
-        task_id="validate_silver_output",
-        python_callable=validate_silver_output,
-    )
-
-    validate_gold_outputs_task = PythonOperator(
-        task_id="validate_gold_outputs",
-        python_callable=validate_gold_outputs,
-    )
-
-    upload_batch_gold_to_s3_task = PythonOperator(
-        task_id="upload_batch_gold_to_s3",
-        python_callable=upload_batch_gold_to_s3,
-    )
-
-    check_streaming_staging_ready_task = PythonOperator(
-        task_id="check_streaming_staging_ready",
-        python_callable=check_streaming_staging_ready,
-    )
-
-    run_downstream_deduplication_check_task = PythonOperator(
-        task_id="run_downstream_deduplication_check",
-        python_callable=run_downstream_deduplication_check,
-    )
-
-    convert_streaming_jsonl_to_csv_task = PythonOperator(
-        task_id="convert_streaming_jsonl_to_csv",
-        python_callable=convert_streaming_jsonl_to_csv,
-    )
-
-    upload_streaming_curated_to_s3_task = PythonOperator(
-        task_id="upload_streaming_curated_to_s3",
-        python_callable=upload_streaming_curated_to_s3,
+    start = EmptyOperator(
+        task_id="start"
     )
 
     check_cloud_platform_ready_task = PythonOperator(
         task_id="check_cloud_platform_ready",
         python_callable=check_cloud_platform_ready,
-    )
-
-    redshift_create_schemas_task = PythonOperator(
-        task_id="redshift_create_schemas",
-        python_callable=redshift_create_schemas,
-    )
-
-    redshift_create_batch_landing_tables_task = PythonOperator(
-        task_id="redshift_create_batch_landing_tables",
-        python_callable=redshift_create_batch_landing_tables,
-    )
-
-    redshift_copy_batch_gold_from_s3_task = PythonOperator(
-        task_id="redshift_copy_batch_gold_from_s3",
-        python_callable=redshift_copy_batch_gold_from_s3,
-    )
-
-    redshift_create_batch_analytics_views_task = PythonOperator(
-        task_id="redshift_create_batch_analytics_views",
-        python_callable=redshift_create_batch_analytics_views,
-    )
-
-    redshift_validate_batch_analytics_task = PythonOperator(
-        task_id="redshift_validate_batch_analytics",
-        python_callable=redshift_validate_batch_analytics,
-    )
-
-    redshift_create_streaming_landing_table_task = PythonOperator(
-        task_id="redshift_create_streaming_landing_table",
-        python_callable=redshift_create_streaming_landing_table,
-    )
-
-    redshift_copy_streaming_curated_from_s3_task = PythonOperator(
-        task_id="redshift_copy_streaming_curated_from_s3",
-        python_callable=redshift_copy_streaming_curated_from_s3,
-    )
-
-    redshift_create_streaming_analytics_views_task = PythonOperator(
-        task_id="redshift_create_streaming_analytics_views",
-        python_callable=redshift_create_streaming_analytics_views,
-    )
-
-    redshift_validate_streaming_analytics_task = PythonOperator(
-        task_id="redshift_validate_streaming_analytics",
-        python_callable=redshift_validate_streaming_analytics,
     )
 
     generate_redshift_execution_summary_task = PythonOperator(
@@ -1088,53 +604,34 @@ with DAG(
         python_callable=generate_orchestration_summary,
     )
 
-    upload_streaming_reports_to_s3_task = PythonOperator(
-        task_id="upload_streaming_reports_to_s3",
-        python_callable=upload_streaming_reports_to_s3,
+    check_batch_pipeline_status_task = PythonOperator(
+        task_id="check_batch_pipeline_status",
+        python_callable=check_batch_pipeline_status,
     )
 
-    end = EmptyOperator(task_id="end")
-
-    (
-            start
-            >> check_batch_etl_ready_task
-            >> run_batch_etl_pipeline_task
-            >> validate_silver_output_task
-            >> validate_gold_outputs_task
-            >> upload_batch_gold_to_s3_task
-            >> check_streaming_staging_ready_task
-            >> run_downstream_deduplication_check_task
-            >> convert_streaming_jsonl_to_csv_task
-            >> upload_streaming_curated_to_s3_task
-            >> check_cloud_platform_ready_task
-            >> redshift_create_schemas_task
+    check_streaming_pipeline_status_task = PythonOperator(
+        task_id="check_streaming_pipeline_status",
+        python_callable=check_streaming_pipeline_status,
     )
 
-    (
-            redshift_create_schemas_task
-            >> redshift_create_batch_landing_tables_task
-            >> redshift_copy_batch_gold_from_s3_task
-            >> redshift_create_batch_analytics_views_task
-            >> redshift_validate_batch_analytics_task
+    end = EmptyOperator(
+        task_id="end"
     )
 
-    (
-            redshift_create_schemas_task
-            >> redshift_create_streaming_landing_table_task
-            >> redshift_copy_streaming_curated_from_s3_task
-            >> redshift_create_streaming_analytics_views_task
-            >> redshift_validate_streaming_analytics_task
-    )
+    start >> [
+        check_batch_pipeline_status_task,
+        check_streaming_pipeline_status_task,
+    ]
 
     [
-        redshift_validate_batch_analytics_task,
-        redshift_validate_streaming_analytics_task,
-    ] >> generate_redshift_execution_summary_task
+        check_batch_pipeline_status_task,
+        check_streaming_pipeline_status_task,
+    ] >> check_cloud_platform_ready_task
 
     (
-            generate_redshift_execution_summary_task
+            check_cloud_platform_ready_task
+            >> generate_redshift_execution_summary_task
             >> validate_redshift_execution_summary_task
             >> generate_orchestration_summary_task
-            >> upload_streaming_reports_to_s3_task
             >> end
     )

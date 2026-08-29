@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+
 from airflow import DAG
 
 from scripts.notify import task_fail_alert, notify_success
@@ -29,6 +32,66 @@ STREAMING_STAGING_DIR = (
     STREAMING_PIPELINE_ROOT
     / "output"
     / "staging"
+)
+
+CLOUD_PLATFORM_ROOT = Path(
+    "/opt/airflow/vendor_payments_cloud_platform"
+)
+
+STREAMING_CURATED_CONVERTER_SCRIPT = (
+    CLOUD_PLATFORM_ROOT
+    / "scripts"
+    / "streaming"
+    / "convert_streaming_jsonl_to_csv.py"
+)
+
+STREAMING_CURATED_UPLOAD_SCRIPT = (
+    CLOUD_PLATFORM_ROOT
+    / "scripts"
+    / "streaming"
+    / "upload_streaming_curated_to_s3.py"
+)
+
+STREAMING_CURATED_DIR = (
+    CLOUD_PLATFORM_ROOT
+    / "data"
+    / "streaming"
+    / "curated"
+)
+
+REDSHIFT_SQL_RUNNER = (
+    CLOUD_PLATFORM_ROOT
+    / "scripts"
+    / "warehouse"
+    / "run_redshift_sql.py"
+)
+
+REDSHIFT_CREATE_STREAMING_LANDING_TABLE_SQL = (
+    CLOUD_PLATFORM_ROOT
+    / "sql"
+    / "redshift"
+    / "06_create_streaming_landing_table.sql"
+)
+
+REDSHIFT_COPY_STREAMING_CURATED_SQL = (
+    CLOUD_PLATFORM_ROOT
+    / "sql"
+    / "redshift"
+    / "07_copy_streaming_curated_from_s3.sql"
+)
+
+REDSHIFT_CREATE_STREAMING_ANALYTICS_VIEWS_SQL = (
+    CLOUD_PLATFORM_ROOT
+    / "sql"
+    / "redshift"
+    / "08_create_streaming_analytics_views.sql"
+)
+
+REDSHIFT_VALIDATE_STREAMING_ANALYTICS_SQL = (
+    CLOUD_PLATFORM_ROOT
+    / "sql"
+    / "redshift"
+    / "09_validate_streaming_analytics.sql"
 )
 
 
@@ -90,6 +153,207 @@ def discover_completed_streaming_window() -> dict:
         "staging_file_size_bytes": staging_file.stat().st_size,
         "status": "ready",
     }
+
+
+def convert_streaming_window_to_curated(
+    staging_file: str,
+    window_id: str,
+) -> str:
+    output_file = (
+        STREAMING_CURATED_DIR
+        / window_id
+        / "vendor_payments_streaming_events.csv"
+    )
+
+    result = subprocess.run(
+        [
+            "python",
+            str(STREAMING_CURATED_CONVERTER_SCRIPT),
+            "--input-file",
+            staging_file,
+            "--output-file",
+            str(output_file),
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Streaming curated conversion failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    return str(output_file)
+
+
+def upload_streaming_window_curated(
+    curated_file: str,
+    window_id: str,
+) -> str:
+    result = subprocess.run(
+        [
+            "python",
+            str(STREAMING_CURATED_UPLOAD_SCRIPT),
+            "--input-file",
+            curated_file,
+            "--window-id",
+            window_id,
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Streaming curated upload failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    output_lines = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+    s3_uri_line = next(
+        (
+            line
+            for line in reversed(output_lines)
+            if line.startswith(
+            "Streaming curated CSV uploaded:"
+        )
+        ),
+        None,
+    )
+
+    if s3_uri_line is None:
+        raise RuntimeError(
+            "Streaming curated S3 URI was not returned."
+        )
+
+    return s3_uri_line.split(
+        "Streaming curated CSV uploaded:",
+        maxsplit=1,
+    )[1].strip()
+
+
+def run_redshift_sql_task(
+    sql_file: Path,
+    failure_message: str,
+    status_key: str,
+    extra_env: dict[str, str] | None = None,
+) -> dict:
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+    }
+
+    if extra_env:
+        environment.update(extra_env)
+
+    result = subprocess.run(
+        [
+            "python",
+            str(REDSHIFT_SQL_RUNNER),
+            str(sql_file),
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{failure_message}\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    return {
+        status_key: "passed",
+        "sql_file": str(sql_file),
+        "stdout": result.stdout.strip(),
+    }
+
+
+def redshift_create_streaming_landing_table() -> dict:
+    return run_redshift_sql_task(
+        sql_file=REDSHIFT_CREATE_STREAMING_LANDING_TABLE_SQL,
+        failure_message=(
+            "Redshift Streaming landing table creation failed."
+        ),
+        status_key=(
+            "redshift_streaming_landing_table_creation_status"
+        ),
+    )
+
+
+def redshift_copy_streaming_curated_from_s3(
+    curated_s3_uri: str,
+) -> dict:
+
+    if not curated_s3_uri.startswith("s3://"):
+        raise ValueError(
+            "Invalid Streaming curated S3 URI: "
+            f"{curated_s3_uri!r}"
+        )
+
+    return run_redshift_sql_task(
+        sql_file=REDSHIFT_COPY_STREAMING_CURATED_SQL,
+        failure_message=(
+            "Redshift Streaming curated COPY from S3 failed."
+        ),
+        status_key=(
+            "redshift_streaming_curated_copy_status"
+        ),
+        extra_env={
+            "STREAMING_CURATED_S3_URI": curated_s3_uri,
+        },
+    )
+
+
+def redshift_create_streaming_analytics_views() -> dict:
+    return run_redshift_sql_task(
+        sql_file=REDSHIFT_CREATE_STREAMING_ANALYTICS_VIEWS_SQL,
+        failure_message=(
+            "Redshift Streaming analytics view creation failed."
+        ),
+        status_key=(
+            "redshift_streaming_analytics_view_creation_status"
+        ),
+    )
+
+
+def redshift_validate_streaming_analytics() -> dict:
+    return run_redshift_sql_task(
+        sql_file=REDSHIFT_VALIDATE_STREAMING_ANALYTICS_SQL,
+        failure_message=(
+            "Redshift Streaming analytics validation query failed."
+        ),
+        status_key=(
+            "redshift_streaming_analytics_validation_status"
+        ),
+    )
 
 
 def mark_streaming_window_processed(
@@ -191,6 +455,67 @@ with DAG(
         },
     )
 
+    convert_curated_task = PythonOperator(
+        task_id="convert_streaming_window_to_curated",
+        python_callable=convert_streaming_window_to_curated,
+        op_kwargs={
+            "staging_file": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_completed_streaming_window'"
+                ")['staging_file'] }}"
+            ),
+            "window_id": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_completed_streaming_window'"
+                ")['window_id'] }}"
+            ),
+        },
+    )
+
+    upload_curated_task = PythonOperator(
+        task_id="upload_streaming_window_curated",
+        python_callable=upload_streaming_window_curated,
+        op_kwargs={
+            "curated_file": (
+                "{{ ti.xcom_pull("
+                "task_ids='convert_streaming_window_to_curated'"
+                ") }}"
+            ),
+            "window_id": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_completed_streaming_window'"
+                ")['window_id'] }}"
+            ),
+        },
+    )
+
+    redshift_create_streaming_landing_table_task = PythonOperator(
+        task_id="redshift_create_streaming_landing_table",
+        python_callable=redshift_create_streaming_landing_table,
+    )
+
+    redshift_copy_streaming_curated_from_s3_task = PythonOperator(
+        task_id="redshift_copy_streaming_curated_from_s3",
+        python_callable=redshift_copy_streaming_curated_from_s3,
+        op_kwargs={
+            "curated_s3_uri": (
+                "{{ ti.xcom_pull("
+                "task_ids='upload_streaming_window_curated'"
+                ") }}"
+            ),
+        },
+    )
+
+    redshift_create_streaming_analytics_views_task = PythonOperator(
+        task_id="redshift_create_streaming_analytics_views",
+        python_callable=redshift_create_streaming_analytics_views,
+    )
+
+    redshift_validate_streaming_analytics_task = PythonOperator(
+        task_id="redshift_validate_streaming_analytics",
+        python_callable=redshift_validate_streaming_analytics,
+    )
+
     mark_processed_task = PythonOperator(
         task_id="mark_streaming_window_processed",
         python_callable=mark_streaming_window_processed,
@@ -208,5 +533,11 @@ with DAG(
             >> extract_task
             >> transform_task
             >> load_task
+            >> convert_curated_task
+            >> upload_curated_task
+            >> redshift_create_streaming_landing_table_task
+            >> redshift_copy_streaming_curated_from_s3_task
+            >> redshift_create_streaming_analytics_views_task
+            >> redshift_validate_streaming_analytics_task
             >> mark_processed_task
     )
