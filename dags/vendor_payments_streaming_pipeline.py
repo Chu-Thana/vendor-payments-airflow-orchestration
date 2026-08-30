@@ -52,6 +52,13 @@ STREAMING_CURATED_UPLOAD_SCRIPT = (
     / "upload_streaming_curated_to_s3.py"
 )
 
+STREAMING_LATEST_POINTER_SCRIPT = (
+    CLOUD_PLATFORM_ROOT
+    / "scripts"
+    / "streaming"
+    / "publish_latest_streaming_pointer.py"
+)
+
 STREAMING_CURATED_DIR = (
     CLOUD_PLATFORM_ROOT
     / "data"
@@ -395,6 +402,63 @@ def run_streaming_cross_layer_validation(
     print(result.stdout)
 
 
+def publish_latest_streaming_pointer(
+    window_id: str,
+    curated_s3_uri: str,
+) -> str:
+    s3_prefix = "s3://"
+
+    if not curated_s3_uri.startswith(s3_prefix):
+        raise ValueError(
+            "Invalid Streaming curated S3 URI: "
+            f"{curated_s3_uri!r}"
+        )
+
+    s3_path = curated_s3_uri[len(s3_prefix):]
+
+    bucket_name, events_s3_key = s3_path.split(
+        "/",
+        maxsplit=1,
+    )
+
+    if not bucket_name or not events_s3_key:
+        raise ValueError(
+            "Streaming curated S3 URI is incomplete: "
+            f"{curated_s3_uri!r}"
+        )
+
+    result = subprocess.run(
+        [
+            "python",
+            str(STREAMING_LATEST_POINTER_SCRIPT),
+            "--window-id",
+            window_id,
+            "--events-s3-key",
+            events_s3_key,
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Latest Streaming pointer publication failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+    return result.stdout.strip()
+
+
 def mark_streaming_window_processed(
     window_id: str,
 ) -> str:
@@ -572,6 +636,23 @@ with DAG(
         },
     )
 
+    publish_latest_streaming_pointer_task = PythonOperator(
+        task_id="publish_latest_streaming_pointer",
+        python_callable=publish_latest_streaming_pointer,
+        op_kwargs={
+            "window_id": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_completed_streaming_window'"
+                ")['window_id'] }}"
+            ),
+            "curated_s3_uri": (
+                "{{ ti.xcom_pull("
+                "task_ids='upload_streaming_window_curated'"
+                ") }}"
+            ),
+        },
+    )
+
     mark_processed_task = PythonOperator(
         task_id="mark_streaming_window_processed",
         python_callable=mark_streaming_window_processed,
@@ -596,5 +677,6 @@ with DAG(
             >> redshift_create_streaming_analytics_views_task
             >> redshift_validate_streaming_analytics_task
             >> streaming_cross_layer_validation_task
+            >> publish_latest_streaming_pointer_task
             >> mark_processed_task
     )
