@@ -356,6 +356,45 @@ def redshift_validate_streaming_analytics() -> dict:
     )
 
 
+def run_streaming_cross_layer_validation(
+    window_id: str,
+    curated_s3_uri: str,
+) -> None:
+    curated_s3_location = (
+        curated_s3_uri.rsplit("/", 1)[0] + "/"
+    )
+
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+        "STREAMING_WINDOW_ID": window_id,
+        "STREAMING_CURATED_S3_LOCATION": curated_s3_location,
+    }
+
+    result = subprocess.run(
+        [
+            "python",
+            "-m",
+            "scripts.validation.run_streaming_cross_layer_validation",
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Streaming cross-layer validation failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+
 def mark_streaming_window_processed(
     window_id: str,
 ) -> str:
@@ -516,6 +555,23 @@ with DAG(
         python_callable=redshift_validate_streaming_analytics,
     )
 
+    streaming_cross_layer_validation_task = PythonOperator(
+        task_id="validate_streaming_cross_layer",
+        python_callable=run_streaming_cross_layer_validation,
+        op_kwargs={
+            "window_id": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_completed_streaming_window'"
+                ")['window_id'] }}"
+            ),
+            "curated_s3_uri": (
+                "{{ ti.xcom_pull("
+                "task_ids='upload_streaming_window_curated'"
+                ") }}"
+            ),
+        },
+    )
+
     mark_processed_task = PythonOperator(
         task_id="mark_streaming_window_processed",
         python_callable=mark_streaming_window_processed,
@@ -539,5 +595,6 @@ with DAG(
             >> redshift_copy_streaming_curated_from_s3_task
             >> redshift_create_streaming_analytics_views_task
             >> redshift_validate_streaming_analytics_task
+            >> streaming_cross_layer_validation_task
             >> mark_processed_task
     )

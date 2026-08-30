@@ -35,6 +35,8 @@ services:
       AIRFLOW_DATA_PATH: /opt/airflow
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      ATHENA_DATABASE: ${ATHENA_DATABASE}
+      ATHENA_OUTPUT_LOCATION: ${ATHENA_OUTPUT_LOCATION}
     user: "${AIRFLOW_UID:-50000}:0"
     volumes: &airflow-common-volumes
       - ./dags:/opt/airflow/dags

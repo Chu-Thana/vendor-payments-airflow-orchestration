@@ -202,6 +202,34 @@ def redshift_validate_batch_analytics() -> dict:
     )
 
 
+def run_batch_cross_layer_validation() -> None:
+    result = subprocess.run(
+        [
+            "python",
+            "-m",
+            "scripts.validation.run_batch_cross_layer_validation",
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Batch cross-layer validation failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+
 with DAG(
     dag_id="vendor_payments_batch_pipeline",
     start_date=datetime(2026, 1, 1),
@@ -285,6 +313,11 @@ with DAG(
         python_callable=redshift_create_batch_analytics_views,
     )
 
+    batch_cross_layer_validation_task = PythonOperator(
+        task_id="validate_batch_cross_layer",
+        python_callable=run_batch_cross_layer_validation,
+    )
+
     redshift_validate_batch_analytics_task = PythonOperator(
         task_id="redshift_validate_batch_analytics",
         python_callable=redshift_validate_batch_analytics,
@@ -304,5 +337,6 @@ with DAG(
             >> redshift_copy_batch_gold_from_s3_task
             >> redshift_create_batch_analytics_views_task
             >> redshift_validate_batch_analytics_task
+            >> batch_cross_layer_validation_task
             >> end
     )
