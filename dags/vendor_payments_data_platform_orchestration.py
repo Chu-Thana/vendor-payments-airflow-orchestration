@@ -42,7 +42,7 @@ def check_pipeline_status(
     latest_run = session.scalar(
         select(DagRun)
         .where(DagRun.dag_id == dag_id)
-        .order_by(DagRun.logical_date.desc())
+        .order_by(DagRun.id.desc())
         .limit(1)
     )
 
