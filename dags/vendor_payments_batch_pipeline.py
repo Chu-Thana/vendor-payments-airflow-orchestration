@@ -169,6 +169,48 @@ def get_or_create_recovery_run(
     return int(row[0])
 
 
+def run_with_recovery(
+    *,
+    context: dict,
+    stage_name: str,
+    operation,
+) -> dict:
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name=stage_name,
+    )
+
+    try:
+        result = operation()
+
+    except Exception as exc:
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=str(exc),
+        )
+        raise
+
+    finish_recovery_stage(
+        stage_execution_id=stage_execution_id,
+        success=True,
+    )
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": stage_name,
+        "status": "SUCCEEDED",
+        "result": result,
+    }
+
+
 def start_recovery_stage(
     pipeline_run_id: int,
     stage_name: str,
@@ -552,6 +594,74 @@ def run_check_gold_with_recovery(**context) -> dict:
     }
 
 
+def run_upload_s3_with_recovery(**context) -> dict:
+    return run_with_recovery(
+        context=context,
+        stage_name="UPLOAD_S3",
+        operation=upload_batch_gold_to_s3,
+    )
+
+
+def run_redshift_create_schemas_with_recovery(
+    **context,
+) -> dict:
+    return run_with_recovery(
+        context=context,
+        stage_name="REDSHIFT_CREATE_SCHEMAS",
+        operation=redshift_create_schemas,
+    )
+
+
+def run_redshift_create_batch_landing_tables_with_recovery(
+    **context,
+) -> dict:
+    return run_with_recovery(
+        context=context,
+        stage_name="REDSHIFT_CREATE_BATCH_LANDING_TABLES",
+        operation=redshift_create_batch_landing_tables,
+    )
+
+
+def run_redshift_copy_batch_gold_with_recovery(
+    **context,
+) -> dict:
+    return run_with_recovery(
+        context=context,
+        stage_name="REDSHIFT_COPY_BATCH_GOLD",
+        operation=redshift_copy_batch_gold_from_s3,
+    )
+
+
+def run_redshift_create_analytics_views_with_recovery(
+    **context,
+) -> dict:
+    return run_with_recovery(
+        context=context,
+        stage_name="REDSHIFT_CREATE_ANALYTICS_VIEWS",
+        operation=redshift_create_batch_analytics_views,
+    )
+
+
+def run_redshift_validate_analytics_with_recovery(
+    **context,
+) -> dict:
+    return run_with_recovery(
+        context=context,
+        stage_name="REDSHIFT_VALIDATE_ANALYTICS",
+        operation=redshift_validate_batch_analytics,
+    )
+
+
+def run_cross_layer_validation_with_recovery(
+    **context,
+) -> dict:
+    return run_with_recovery(
+        context=context,
+        stage_name="CROSS_LAYER_VALIDATION",
+        operation=run_batch_cross_layer_validation,
+    )
+
+
 def upload_batch_gold_to_s3() -> dict:
     result = subprocess.run(
         [
@@ -745,37 +855,43 @@ with DAG(
 
     upload_batch_gold_to_s3_task = PythonOperator(
         task_id="upload_batch_gold_to_s3",
-        python_callable=upload_batch_gold_to_s3,
+        python_callable=run_upload_s3_with_recovery,
     )
 
     redshift_create_schemas_task = PythonOperator(
         task_id="redshift_create_schemas",
-        python_callable=redshift_create_schemas,
+        python_callable=run_redshift_create_schemas_with_recovery,
     )
 
     redshift_create_batch_landing_tables_task = PythonOperator(
         task_id="redshift_create_batch_landing_tables",
-        python_callable=redshift_create_batch_landing_tables,
+        python_callable=(
+            run_redshift_create_batch_landing_tables_with_recovery
+        ),
     )
 
     redshift_copy_batch_gold_from_s3_task = PythonOperator(
         task_id="redshift_copy_batch_gold_from_s3",
-        python_callable=redshift_copy_batch_gold_from_s3,
+        python_callable=run_redshift_copy_batch_gold_with_recovery,
     )
 
     redshift_create_batch_analytics_views_task = PythonOperator(
         task_id="redshift_create_batch_analytics_views",
-        python_callable=redshift_create_batch_analytics_views,
+        python_callable=(
+            run_redshift_create_analytics_views_with_recovery
+        ),
     )
 
     redshift_validate_batch_analytics_task = PythonOperator(
         task_id="redshift_validate_batch_analytics",
-        python_callable=redshift_validate_batch_analytics,
+        python_callable=(
+            run_redshift_validate_analytics_with_recovery
+        ),
     )
 
     batch_cross_layer_validation_task = PythonOperator(
         task_id="validate_batch_cross_layer",
-        python_callable=run_batch_cross_layer_validation,
+        python_callable=run_cross_layer_validation_with_recovery,
     )
 
     end = EmptyOperator(task_id="end")
