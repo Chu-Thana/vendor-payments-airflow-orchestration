@@ -4,19 +4,24 @@ services:
     env_file:
       - .env
     container_name: airflow-postgres
+
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+
     ports:
       - "5433:5432"
+
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
       interval: 10s
       timeout: 5s
       retries: 5
+
 
   airflow-init:
     build: .
@@ -24,9 +29,11 @@ services:
     env_file:
       - .env
     container_name: airflow-init
+
     depends_on:
       postgres:
         condition: service_healthy
+
     environment: &airflow-common-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -37,7 +44,9 @@ services:
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       ATHENA_DATABASE: ${ATHENA_DATABASE}
       ATHENA_OUTPUT_LOCATION: ${ATHENA_OUTPUT_LOCATION}
+
     user: "${AIRFLOW_UID:-50000}:0"
+
     volumes: &airflow-common-volumes
       - ./dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
@@ -51,6 +60,7 @@ services:
       - "${VENDOR_STREAMING_HOST_PATH}:${VENDOR_STREAMING_CONTAINER_PATH}"
       - "${VENDOR_CLOUD_HOST_PATH}:${VENDOR_CLOUD_CONTAINER_PATH}"
       - "${VENDOR_STREAMING_STAGING_HOST_PATH}:${VENDOR_STREAMING_STAGING_CONTAINER_PATH}:ro"
+
     command: >
       bash -c "
       airflow db migrate &&
@@ -69,17 +79,27 @@ services:
     env_file:
       - .env
     container_name: airflow-webserver
+
     depends_on:
       postgres:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
+
     environment:
       <<: *airflow-common-env
+
     user: "${AIRFLOW_UID:-50000}:0"
+
     volumes: *airflow-common-volumes
+
+    networks:
+      - default
+      - vendor-payments-shared
+
     ports:
       - "8080:8080"
+
     command: webserver
 
   airflow-scheduler:
@@ -88,16 +108,29 @@ services:
     env_file:
       - .env
     container_name: airflow-scheduler
+
     depends_on:
       postgres:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
+
     environment:
       <<: *airflow-common-env
+
     user: "${AIRFLOW_UID:-50000}:0"
+
     volumes: *airflow-common-volumes
+
+    networks:
+      - default
+      - vendor-payments-shared
+
     command: scheduler
 
 volumes:
   postgres-db-volume:
+
+networks:
+  vendor-payments-shared:
+    external: true

@@ -14,9 +14,43 @@ except ImportError:
     from airflow.operators.empty import EmptyOperator
     from airflow.operators.python import PythonOperator
 
+import psycopg2
+
 BATCH_ETL_PATH = os.getenv(
     "VENDOR_BATCH_ETL_CONTAINER_PATH",
     "/opt/airflow/vendor_payments_batch_etl",
+)
+
+BATCH_TRANSFORM_SILVER_SCRIPT = (
+    f"{BATCH_ETL_PATH}/scripts/pipeline/transform_silver.py"
+)
+
+BATCH_BUILD_GOLD_SCRIPT = (
+    f"{BATCH_ETL_PATH}/scripts/pipeline/build_gold_marts.py"
+)
+
+BATCH_CHECK_SILVER_SCRIPT = (
+    f"{BATCH_ETL_PATH}/scripts/checks/check_silver_output.py"
+)
+
+BATCH_CHECK_GOLD_SCRIPT = (
+    f"{BATCH_ETL_PATH}/scripts/checks/check_gold_outputs.py"
+)
+
+BATCH_SILVER_CANDIDATE_FILE = (
+    Path(BATCH_ETL_PATH)
+    / "data"
+    / "processed"
+    / "silver"
+    / "vendor_payments_silver.candidate.csv"
+)
+
+BATCH_SILVER_FINAL_FILE = (
+    Path(BATCH_ETL_PATH)
+    / "data"
+    / "processed"
+    / "silver"
+    / "vendor_payments_silver.csv"
 )
 
 CLOUD_PLATFORM_ROOT = Path(
@@ -77,6 +111,445 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=2),
 }
+
+
+def get_recovery_connection():
+    return psycopg2.connect(
+        host=os.environ["RECOVERY_DB_HOST"],
+        port=int(os.getenv("RECOVERY_DB_PORT", "5432")),
+        dbname=os.environ["RECOVERY_DB_NAME"],
+        user=os.environ["RECOVERY_DB_USER"],
+        password=os.environ["RECOVERY_DB_PASSWORD"],
+    )
+
+
+def get_or_create_recovery_run(
+    airflow_run_id: str,
+) -> int:
+    run_key = f"airflow::{airflow_run_id}"
+
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO recovery.pipeline_runs (
+                    run_key,
+                    pipeline_name,
+                    mode,
+                    status
+                )
+                VALUES (
+                    %s,
+                    'vendor_payments_batch_etl',
+                    'FULL',
+                    'CREATED'
+                )
+                ON CONFLICT (run_key)
+                DO NOTHING;
+                """,
+                (run_key,),
+            )
+
+            cursor.execute(
+                """
+                SELECT pipeline_run_id
+                FROM recovery.pipeline_runs
+                WHERE run_key = %s;
+                """,
+                (run_key,),
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"Recovery pipeline run not found: {run_key}"
+        )
+
+    return int(row[0])
+
+
+def start_recovery_stage(
+    pipeline_run_id: int,
+    stage_name: str,
+) -> int:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT recovery.start_stage_attempt(
+                    %s,
+                    %s
+                );
+                """,
+                (
+                    pipeline_run_id,
+                    stage_name,
+                ),
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"Could not start recovery stage: {stage_name}"
+        )
+
+    return int(row[0])
+
+
+def finish_recovery_stage(
+    stage_execution_id: int,
+    success: bool,
+    error_message: str | None = None,
+) -> None:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT recovery.finish_stage_attempt(
+                    %s,
+                    %s,
+                    %s
+                );
+                """,
+                (
+                    stage_execution_id,
+                    success,
+                    error_message,
+                ),
+            )
+
+
+def run_transform_silver_with_recovery(**context) -> dict:
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="TRANSFORM_SILVER",
+    )
+
+    result = subprocess.run(
+        [
+            "python",
+            "scripts/pipeline/transform_silver.py",
+        ],
+        cwd=BATCH_ETL_PATH,
+        env={
+            **os.environ,
+            "PYTHONPATH": BATCH_ETL_PATH,
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    print(result.stdout)
+
+    if result.returncode != 0:
+        error_message = (
+            "TRANSFORM_SILVER failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=error_message,
+        )
+
+        raise RuntimeError(error_message)
+
+    finish_recovery_stage(
+        stage_execution_id=stage_execution_id,
+        success=True,
+    )
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "TRANSFORM_SILVER",
+        "status": "SUCCEEDED",
+    }
+
+
+def run_check_silver_with_recovery(**context) -> dict:
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="CHECK_SILVER",
+    )
+
+    try:
+        validation_result = validate_silver_output()
+
+    except Exception as exc:
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=str(exc),
+        )
+
+        raise
+
+    finish_recovery_stage(
+        stage_execution_id=stage_execution_id,
+        success=True,
+    )
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "CHECK_SILVER",
+        "status": "SUCCEEDED",
+        "validation_result": validation_result,
+    }
+
+
+def validate_silver_output() -> dict:
+    command = f"""
+import sys
+from pathlib import Path
+
+batch_root = Path({BATCH_ETL_PATH!r})
+checks_path = batch_root / "scripts" / "checks"
+
+sys.path.insert(0, str(checks_path))
+sys.path.insert(0, str(batch_root))
+
+from check_silver_output import check_silver_output
+
+candidate_file = Path(
+    {str(BATCH_SILVER_CANDIDATE_FILE)!r}
+)
+
+final_file = Path(
+    {str(BATCH_SILVER_FINAL_FILE)!r}
+)
+
+result = check_silver_output(
+    silver_file=candidate_file
+)
+
+print(
+    f"Silver validation status: {{result['status']}}"
+)
+
+if result["status"] == "FAIL":
+    raise RuntimeError(
+        "Silver validation failed: "
+        + "; ".join(result["critical_failures"])
+    )
+
+candidate_file.replace(final_file)
+
+print(
+    f"Silver candidate published to: {{final_file}}"
+)
+"""
+
+    result = subprocess.run(
+        [
+            "python",
+            "-c",
+            command,
+        ],
+        cwd=BATCH_ETL_PATH,
+        env={
+            **os.environ,
+            "PYTHONPATH": BATCH_ETL_PATH,
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    print(result.stdout)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Silver validation task failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    return {
+        "validation_status": "passed",
+        "stdout": result.stdout.strip(),
+    }
+
+
+def validate_gold_outputs() -> dict:
+    command = f"""
+import sys
+from pathlib import Path
+
+batch_root = Path({BATCH_ETL_PATH!r})
+checks_path = batch_root / "scripts" / "checks"
+
+sys.path.insert(0, str(checks_path))
+sys.path.insert(0, str(batch_root))
+
+from check_gold_outputs import (
+    check_gold_outputs,
+    publish_gold_candidate,
+)
+
+result = check_gold_outputs()
+
+print(
+    f"Gold validation status: {{result['status']}}"
+)
+
+if result["status"] == "FAIL":
+    raise RuntimeError(
+        "Gold validation failed. "
+        f"Failed marts: {{result['failed_mart_count']}}"
+    )
+
+publish_gold_candidate()
+
+print(
+    "Gold candidate set published successfully."
+)
+"""
+
+    result = subprocess.run(
+        [
+            "python",
+            "-c",
+            command,
+        ],
+        cwd=BATCH_ETL_PATH,
+        env={
+            **os.environ,
+            "PYTHONPATH": BATCH_ETL_PATH,
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    print(result.stdout)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Gold validation task failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    return {
+        "validation_status": "passed",
+        "stdout": result.stdout.strip(),
+    }
+
+
+def run_build_gold_with_recovery(**context) -> dict:
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="BUILD_GOLD",
+    )
+
+    result = subprocess.run(
+        [
+            "python",
+            "scripts/pipeline/build_gold_marts.py",
+        ],
+        cwd=BATCH_ETL_PATH,
+        env={
+            **os.environ,
+            "PYTHONPATH": BATCH_ETL_PATH,
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    print(result.stdout)
+
+    if result.returncode != 0:
+        error_message = (
+            "BUILD_GOLD failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=error_message,
+        )
+
+        raise RuntimeError(error_message)
+
+    finish_recovery_stage(
+        stage_execution_id=stage_execution_id,
+        success=True,
+    )
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "BUILD_GOLD",
+        "status": "SUCCEEDED",
+    }
+
+
+def run_check_gold_with_recovery(**context) -> dict:
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="CHECK_GOLD",
+    )
+
+    try:
+        validation_result = validate_gold_outputs()
+
+    except Exception as exc:
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=str(exc),
+        )
+        raise
+
+    finish_recovery_stage(
+        stage_execution_id=stage_execution_id,
+        success=True,
+    )
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "CHECK_GOLD",
+        "status": "SUCCEEDED",
+        "validation_result": validation_result,
+    }
 
 
 def upload_batch_gold_to_s3() -> dict:
@@ -240,52 +713,34 @@ with DAG(
 ) as dag:
     start = EmptyOperator(task_id="start")
 
-    check_batch_etl_source = BashOperator(
-        task_id="check_batch_etl_source",
+    check_batch_etl_scripts = BashOperator(
+        task_id="check_batch_etl_scripts",
         bash_command=(
-            f"test -s "
-            f"{BATCH_ETL_PATH}/scripts/pipeline/run_pipeline.py"
+            f"test -s {BATCH_TRANSFORM_SILVER_SCRIPT} && "
+            f"test -s {BATCH_CHECK_SILVER_SCRIPT} && "
+            f"test -s {BATCH_BUILD_GOLD_SCRIPT} && "
+            f"test -s {BATCH_CHECK_GOLD_SCRIPT}"
         ),
     )
 
-    run_vendor_payments_pipeline = BashOperator(
-        task_id="run_vendor_payments_pipeline",
-        bash_command=(
-            f"cd {BATCH_ETL_PATH} && "
-            f"PYTHONPATH={BATCH_ETL_PATH} "
-            "python scripts/pipeline/run_pipeline.py"
-        ),
+    transform_silver_task = PythonOperator(
+        task_id="transform_silver",
+        python_callable=run_transform_silver_with_recovery,
     )
 
-    check_silver_output = BashOperator(
-        task_id="check_silver_output",
-        bash_command=(
-            f"test -s "
-            f"{BATCH_ETL_PATH}/data/processed/silver/"
-            "vendor_payments_silver.csv "
-            '&& echo "Silver output validation passed"'
-        ),
+    check_silver_task = PythonOperator(
+        task_id="check_silver",
+        python_callable=run_check_silver_with_recovery,
     )
 
-    check_gold_outputs = BashOperator(
-        task_id="check_gold_outputs",
-        bash_command=(
-            f"test -s "
-            f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
-            "mart_spending_by_fiscal_year.csv && "
-            f"test -s "
-            f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
-            "mart_spending_by_department.csv && "
-            f"test -s "
-            f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
-            "mart_spending_by_supplier_top_n.csv && "
-            f"test -s "
-            f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
-            "mart_pending_by_department.csv && "
-            f"test -s "
-            f"{BATCH_ETL_PATH}/data/processed/gold_sample/"
-            "mart_fund_category_summary.csv"
-        ),
+    build_gold_task = PythonOperator(
+        task_id="build_gold",
+        python_callable=run_build_gold_with_recovery,
+    )
+
+    check_gold_task = PythonOperator(
+        task_id="check_gold",
+        python_callable=run_check_gold_with_recovery,
     )
 
     upload_batch_gold_to_s3_task = PythonOperator(
@@ -327,10 +782,11 @@ with DAG(
 
     (
             start
-            >> check_batch_etl_source
-            >> run_vendor_payments_pipeline
-            >> check_silver_output
-            >> check_gold_outputs
+            >> check_batch_etl_scripts
+            >> transform_silver_task
+            >> check_silver_task
+            >> build_gold_task
+            >> check_gold_task
             >> upload_batch_gold_to_s3_task
             >> redshift_create_schemas_task
             >> redshift_create_batch_landing_tables_task
