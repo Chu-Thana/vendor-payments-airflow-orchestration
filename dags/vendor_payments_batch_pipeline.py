@@ -112,6 +112,14 @@ default_args = {
     "retry_delay": timedelta(minutes=2),
 }
 
+GOLD_ARTIFACT_NAMES = (
+    "mart_spending_by_fiscal_year.csv",
+    "mart_spending_by_department.csv",
+    "mart_spending_by_supplier_top_n.csv",
+    "mart_pending_by_department.csv",
+    "mart_fund_category_summary.csv",
+)
+
 
 def get_recovery_connection():
     return psycopg2.connect(
@@ -214,6 +222,8 @@ def run_with_recovery(
 def start_recovery_stage(
     pipeline_run_id: int,
     stage_name: str,
+    input_dataset_version_id: int | None = None,
+    output_dataset_version_id: int | None = None,
 ) -> int:
     with get_recovery_connection() as connection:
         with connection.cursor() as cursor:
@@ -232,12 +242,29 @@ def start_recovery_stage(
 
             row = cursor.fetchone()
 
-    if row is None:
-        raise RuntimeError(
-            f"Could not start recovery stage: {stage_name}"
-        )
+            if row is None:
+                raise RuntimeError(
+                    "Stage attempt could not be started."
+                )
 
-    return int(row[0])
+            stage_execution_id = int(row[0])
+
+            cursor.execute(
+                """
+                UPDATE recovery.stage_executions
+                SET
+                    input_dataset_version_id = %s,
+                    output_dataset_version_id = %s
+                WHERE stage_execution_id = %s;
+                """,
+                (
+                    input_dataset_version_id,
+                    output_dataset_version_id,
+                    stage_execution_id,
+                ),
+            )
+
+    return stage_execution_id
 
 
 def finish_recovery_stage(
@@ -263,16 +290,47 @@ def finish_recovery_stage(
             )
 
 
-def run_transform_silver_with_recovery(**context) -> dict:
+def run_transform_silver_with_recovery(
+    **context,
+) -> dict:
     dag_run = context["dag_run"]
 
     pipeline_run_id = get_or_create_recovery_run(
         airflow_run_id=dag_run.run_id,
     )
 
+    dataset_version_id = (
+        get_or_create_dataset_version(
+            pipeline_run_id=pipeline_run_id,
+            layer="SILVER",
+        )
+    )
+
+    update_dataset_version_status(
+        dataset_version_id,
+        "BUILDING",
+    )
+
+    dataset_artifact_id = (
+        get_or_create_dataset_artifact(
+            dataset_version_id=dataset_version_id,
+            artifact_name="vendor_payments_silver.csv",
+            artifact_path=str(
+                BATCH_SILVER_FINAL_FILE
+            ),
+        )
+    )
+
+    artifact_execution_id = (
+        start_recovery_artifact(
+            dataset_artifact_id
+        )
+    )
+
     stage_execution_id = start_recovery_stage(
         pipeline_run_id=pipeline_run_id,
         stage_name="TRANSFORM_SILVER",
+        output_dataset_version_id=dataset_version_id,
     )
 
     result = subprocess.run(
@@ -296,26 +354,61 @@ def run_transform_silver_with_recovery(**context) -> dict:
         error_message = (
             "TRANSFORM_SILVER failed.\n"
             f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
             f"STDERR:\n{result.stderr}"
         )
 
-        finish_recovery_stage(
-            stage_execution_id=stage_execution_id,
-            success=False,
+        finish_recovery_artifact(
+            artifact_execution_id,
+            False,
             error_message=error_message,
         )
 
-        raise RuntimeError(error_message)
+        update_dataset_version_status(
+            dataset_version_id,
+            "FAILED",
+        )
+
+        finish_recovery_stage(
+            stage_execution_id,
+            False,
+            error_message,
+        )
+
+        raise RuntimeError(
+            error_message
+        )
+
+    finish_recovery_artifact(
+        artifact_execution_id,
+        True,
+    )
+
+    update_dataset_version_status(
+        dataset_version_id,
+        "TRANSFORMED",
+    )
 
     finish_recovery_stage(
-        stage_execution_id=stage_execution_id,
-        success=True,
+        stage_execution_id,
+        True,
     )
 
     return {
         "pipeline_run_id": pipeline_run_id,
-        "stage_execution_id": stage_execution_id,
-        "stage_name": "TRANSFORM_SILVER",
+        "dataset_version_id": dataset_version_id,
+        "dataset_artifact_id": (
+            dataset_artifact_id
+        ),
+        "artifact_execution_id": (
+            artifact_execution_id
+        ),
+        "stage_execution_id": (
+            stage_execution_id
+        ),
+        "stage_name": (
+            "TRANSFORM_SILVER"
+        ),
         "status": "SUCCEEDED",
     }
 
@@ -327,15 +420,29 @@ def run_check_silver_with_recovery(**context) -> dict:
         airflow_run_id=dag_run.run_id,
     )
 
+    dataset_version_id = (
+        get_or_create_dataset_version(
+            pipeline_run_id=pipeline_run_id,
+            layer="SILVER",
+        )
+    )
+
     stage_execution_id = start_recovery_stage(
         pipeline_run_id=pipeline_run_id,
         stage_name="CHECK_SILVER",
+        input_dataset_version_id=dataset_version_id,
+        output_dataset_version_id=dataset_version_id,
     )
 
     try:
         validation_result = validate_silver_output()
 
     except Exception as exc:
+        update_dataset_version_status(
+            dataset_version_id,
+            "FAILED",
+        )
+
         finish_recovery_stage(
             stage_execution_id=stage_execution_id,
             success=False,
@@ -344,6 +451,24 @@ def run_check_silver_with_recovery(**context) -> dict:
 
         raise
 
+    update_dataset_version_status(
+        dataset_version_id,
+        "PUBLISHED",
+    )
+
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE recovery.dataset_artifacts
+                SET status = 'PUBLISHED'
+                WHERE dataset_version_id = %s
+                  AND artifact_name =
+                      'vendor_payments_silver.csv';
+                """,
+                (dataset_version_id,),
+            )
+
     finish_recovery_stage(
         stage_execution_id=stage_execution_id,
         success=True,
@@ -351,11 +476,252 @@ def run_check_silver_with_recovery(**context) -> dict:
 
     return {
         "pipeline_run_id": pipeline_run_id,
+        "dataset_version_id": dataset_version_id,
         "stage_execution_id": stage_execution_id,
         "stage_name": "CHECK_SILVER",
         "status": "SUCCEEDED",
         "validation_result": validation_result,
     }
+
+
+def get_or_create_dataset_version(
+    pipeline_run_id: int,
+    layer: str,
+) -> int:
+    version_key = (
+        f"{layer.lower()}_pipeline_run_{pipeline_run_id}"
+    )
+
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO recovery.dataset_versions (
+                    pipeline_run_id,
+                    version_key,
+                    layer,
+                    status
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    'CREATED'
+                )
+                ON CONFLICT (
+                    pipeline_run_id,
+                    layer
+                )
+                DO NOTHING;
+                """,
+                (
+                    pipeline_run_id,
+                    version_key,
+                    layer,
+                ),
+            )
+
+            cursor.execute(
+                """
+                SELECT dataset_version_id
+                FROM recovery.dataset_versions
+                WHERE pipeline_run_id = %s
+                  AND layer = %s;
+                """,
+                (
+                    pipeline_run_id,
+                    layer,
+                ),
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            "Dataset version could not be created "
+            f"for pipeline_run_id={pipeline_run_id}, "
+            f"layer={layer}."
+        )
+
+    return int(row[0])
+
+
+def update_dataset_version_status(
+    dataset_version_id: int,
+    status: str,
+    row_count: int | None = None,
+) -> None:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE recovery.dataset_versions
+                SET
+                    status = %s,
+                    row_count = COALESCE(
+                        %s,
+                        row_count
+                    ),
+                    validated_at = CASE
+                        WHEN %s IN (
+                            'VALIDATED',
+                            'PUBLISHED'
+                        )
+                        THEN clock_timestamp()
+                        ELSE validated_at
+                    END,
+                    published_at = CASE
+                        WHEN %s = 'PUBLISHED'
+                        THEN clock_timestamp()
+                        ELSE published_at
+                    END
+                WHERE dataset_version_id = %s;
+                """,
+                (
+                    status,
+                    row_count,
+                    status,
+                    status,
+                    dataset_version_id,
+                ),
+            )
+
+
+def get_or_create_dataset_artifact(
+    dataset_version_id: int,
+    artifact_name: str,
+    artifact_path: str,
+) -> int:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO recovery.dataset_artifacts (
+                    dataset_version_id,
+                    artifact_name,
+                    artifact_path,
+                    status
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    'CREATED'
+                )
+                ON CONFLICT (
+                    dataset_version_id,
+                    artifact_name
+                )
+                DO NOTHING;
+                """,
+                (
+                    dataset_version_id,
+                    artifact_name,
+                    artifact_path,
+                ),
+            )
+
+            cursor.execute(
+                """
+                SELECT dataset_artifact_id
+                FROM recovery.dataset_artifacts
+                WHERE dataset_version_id = %s
+                  AND artifact_name = %s;
+                """,
+                (
+                    dataset_version_id,
+                    artifact_name,
+                ),
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"Dataset artifact could not be created: "
+            f"{artifact_name}"
+        )
+
+    return int(row[0])
+
+
+def start_recovery_artifact(
+    dataset_artifact_id: int,
+) -> int:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT recovery.start_artifact_attempt(
+                    %s
+                );
+                """,
+                (dataset_artifact_id,),
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            "Artifact attempt could not be started."
+        )
+
+    return int(row[0])
+
+
+def finish_recovery_artifact(
+    artifact_execution_id: int,
+    success: bool,
+    row_count: int | None = None,
+    checksum: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT recovery.finish_artifact_attempt(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                );
+                """,
+                (
+                    artifact_execution_id,
+                    success,
+                    row_count,
+                    checksum,
+                    error_message,
+                ),
+            )
+
+
+def get_or_create_gold_artifacts(
+    dataset_version_id: int,
+) -> dict[str, int]:
+    gold_candidate_dir = (
+        Path(BATCH_ETL_PATH)
+        / "data"
+        / "processed"
+        / "gold_candidate"
+    )
+
+    artifact_ids: dict[str, int] = {}
+
+    for artifact_name in GOLD_ARTIFACT_NAMES:
+        artifact_id = get_or_create_dataset_artifact(
+            dataset_version_id=dataset_version_id,
+            artifact_name=artifact_name,
+            artifact_path=str(
+                gold_candidate_dir / artifact_name
+            ),
+        )
+
+        artifact_ids[artifact_name] = artifact_id
+
+    return artifact_ids
 
 
 def validate_silver_output() -> dict:
@@ -506,9 +872,33 @@ def run_build_gold_with_recovery(**context) -> dict:
         airflow_run_id=dag_run.run_id,
     )
 
+    dataset_version_id = get_or_create_dataset_version(
+        pipeline_run_id=pipeline_run_id,
+        layer="GOLD",
+    )
+
+    update_dataset_version_status(
+        dataset_version_id,
+        "BUILDING",
+    )
+
+    artifact_ids = get_or_create_gold_artifacts(
+        dataset_version_id=dataset_version_id,
+    )
+
+    artifact_execution_ids: dict[str, int] = {}
+
+    for artifact_name, artifact_id in artifact_ids.items():
+        artifact_execution_ids[artifact_name] = (
+            start_recovery_artifact(
+                artifact_id
+            )
+        )
+
     stage_execution_id = start_recovery_stage(
         pipeline_run_id=pipeline_run_id,
         stage_name="BUILD_GOLD",
+        output_dataset_version_id=dataset_version_id,
     )
 
     result = subprocess.run(
@@ -536,6 +926,20 @@ def run_build_gold_with_recovery(**context) -> dict:
             f"STDERR:\n{result.stderr}"
         )
 
+        for artifact_execution_id in (
+            artifact_execution_ids.values()
+        ):
+            finish_recovery_artifact(
+                artifact_execution_id,
+                False,
+                error_message=error_message,
+            )
+
+        update_dataset_version_status(
+            dataset_version_id,
+            "FAILED",
+        )
+
         finish_recovery_stage(
             stage_execution_id=stage_execution_id,
             success=False,
@@ -544,6 +948,19 @@ def run_build_gold_with_recovery(**context) -> dict:
 
         raise RuntimeError(error_message)
 
+    for artifact_execution_id in (
+        artifact_execution_ids.values()
+    ):
+        finish_recovery_artifact(
+            artifact_execution_id,
+            True,
+        )
+
+    update_dataset_version_status(
+        dataset_version_id,
+        "TRANSFORMED",
+    )
+
     finish_recovery_stage(
         stage_execution_id=stage_execution_id,
         success=True,
@@ -551,6 +968,9 @@ def run_build_gold_with_recovery(**context) -> dict:
 
     return {
         "pipeline_run_id": pipeline_run_id,
+        "dataset_version_id": dataset_version_id,
+        "artifact_ids": artifact_ids,
+        "artifact_execution_ids": artifact_execution_ids,
         "stage_execution_id": stage_execution_id,
         "stage_name": "BUILD_GOLD",
         "status": "SUCCEEDED",
@@ -564,21 +984,50 @@ def run_check_gold_with_recovery(**context) -> dict:
         airflow_run_id=dag_run.run_id,
     )
 
+    dataset_version_id = get_or_create_dataset_version(
+        pipeline_run_id=pipeline_run_id,
+        layer="GOLD",
+    )
+
     stage_execution_id = start_recovery_stage(
         pipeline_run_id=pipeline_run_id,
         stage_name="CHECK_GOLD",
+        input_dataset_version_id=dataset_version_id,
+        output_dataset_version_id=dataset_version_id,
     )
 
     try:
         validation_result = validate_gold_outputs()
 
     except Exception as exc:
+        update_dataset_version_status(
+            dataset_version_id,
+            "FAILED",
+        )
+
         finish_recovery_stage(
             stage_execution_id=stage_execution_id,
             success=False,
             error_message=str(exc),
         )
+
         raise
+
+    update_dataset_version_status(
+        dataset_version_id,
+        "PUBLISHED",
+    )
+
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE recovery.dataset_artifacts
+                SET status = 'PUBLISHED'
+                WHERE dataset_version_id = %s;
+                """,
+                (dataset_version_id,),
+            )
 
     finish_recovery_stage(
         stage_execution_id=stage_execution_id,
@@ -587,6 +1036,7 @@ def run_check_gold_with_recovery(**context) -> dict:
 
     return {
         "pipeline_run_id": pipeline_run_id,
+        "dataset_version_id": dataset_version_id,
         "stage_execution_id": stage_execution_id,
         "stage_name": "CHECK_GOLD",
         "status": "SUCCEEDED",
