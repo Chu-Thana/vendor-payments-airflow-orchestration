@@ -227,11 +227,18 @@ def start_recovery_stage(
     input_dataset_version_id: int | None = None,
     output_dataset_version_id: int | None = None,
 ) -> int:
+    recover_stale_running_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name=stage_name,
+    )
+
     with get_recovery_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT recovery.start_stage_attempt(
+                    %s,
+                    %s,
                     %s,
                     %s
                 );
@@ -239,34 +246,19 @@ def start_recovery_stage(
                 (
                     pipeline_run_id,
                     stage_name,
+                    input_dataset_version_id,
+                    output_dataset_version_id,
                 ),
             )
 
             row = cursor.fetchone()
 
-            if row is None:
-                raise RuntimeError(
-                    "Stage attempt could not be started."
-                )
+    if row is None:
+        raise RuntimeError(
+            "Stage attempt could not be started."
+        )
 
-            stage_execution_id = int(row[0])
-
-            cursor.execute(
-                """
-                UPDATE recovery.stage_executions
-                SET
-                    input_dataset_version_id = %s,
-                    output_dataset_version_id = %s
-                WHERE stage_execution_id = %s;
-                """,
-                (
-                    input_dataset_version_id,
-                    output_dataset_version_id,
-                    stage_execution_id,
-                ),
-            )
-
-    return stage_execution_id
+    return int(row[0])
 
 
 def finish_recovery_stage(
@@ -795,6 +787,10 @@ def get_or_create_dataset_artifact(
 def start_recovery_artifact(
     dataset_artifact_id: int,
 ) -> int:
+    recover_stale_running_artifact(
+        dataset_artifact_id=dataset_artifact_id,
+    )
+
     with get_recovery_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -814,6 +810,58 @@ def start_recovery_artifact(
         )
 
     return int(row[0])
+
+
+def recover_stale_running_artifact(
+    dataset_artifact_id: int,
+) -> None:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    artifact_execution_id,
+                    attempt_number,
+                    started_at
+                FROM recovery.artifact_executions
+                WHERE dataset_artifact_id = %s
+                  AND status = 'RUNNING'
+                ORDER BY attempt_number DESC
+                LIMIT 1;
+                """,
+                (dataset_artifact_id,),
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        return
+
+    (
+        stale_artifact_execution_id,
+        stale_attempt_number,
+        stale_started_at,
+    ) = row
+
+    finish_recovery_artifact(
+        artifact_execution_id=int(
+            stale_artifact_execution_id
+        ),
+        success=False,
+        error_message=(
+            "Automatically recovered stale RUNNING artifact "
+            "attempt before starting a new attempt. "
+            f"Previous attempt_number={stale_attempt_number}, "
+            f"started_at={stale_started_at}."
+        ),
+    )
+
+    print(
+        "Recovered stale artifact attempt: "
+        f"dataset_artifact_id={dataset_artifact_id}, "
+        f"artifact_execution_id={stale_artifact_execution_id}, "
+        f"attempt_number={stale_attempt_number}"
+    )
 
 
 def finish_recovery_artifact(
@@ -843,6 +891,65 @@ def finish_recovery_artifact(
                     error_message,
                 ),
             )
+
+
+def recover_stale_running_stage(
+    pipeline_run_id: int,
+    stage_name: str,
+) -> None:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    stage_execution_id,
+                    attempt_number,
+                    started_at
+                FROM recovery.stage_executions
+                WHERE pipeline_run_id = %s
+                  AND stage_name = %s
+                  AND status = 'RUNNING'
+                ORDER BY attempt_number DESC
+                LIMIT 1;
+                """,
+                (
+                    pipeline_run_id,
+                    stage_name,
+                ),
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        return
+
+    (
+        stale_stage_execution_id,
+        stale_attempt_number,
+        stale_started_at,
+    ) = row
+
+    error_message = (
+        "Automatically recovered stale RUNNING stage attempt "
+        f"before starting a new Airflow task attempt. "
+        f"Previous attempt_number={stale_attempt_number}, "
+        f"started_at={stale_started_at}."
+    )
+
+    finish_recovery_stage(
+        stage_execution_id=int(
+            stale_stage_execution_id
+        ),
+        success=False,
+        error_message=error_message,
+    )
+
+    print(
+        "Recovered stale stage attempt: "
+        f"stage={stage_name}, "
+        f"stage_execution_id={stale_stage_execution_id}, "
+        f"attempt_number={stale_attempt_number}"
+    )
 
 
 def get_or_create_gold_artifacts(
