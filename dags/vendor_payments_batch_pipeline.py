@@ -1226,6 +1226,27 @@ def run_check_gold_with_recovery(**context) -> dict:
     }
 
 
+def normalize_validation_status(
+    status: str,
+) -> str:
+    normalized = status.strip().upper()
+
+    status_mapping = {
+        "PASSED": "PASS",
+        "PASS": "PASS",
+        "PASS_WITH_WARNINGS": "PASS_WITH_WARNINGS",
+        "FAILED": "FAIL",
+        "FAIL": "FAIL",
+    }
+
+    try:
+        return status_mapping[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported validation status: {status}"
+        ) from exc
+
+
 def run_upload_s3_with_recovery(**context) -> dict:
     return run_with_recovery(
         context=context,
@@ -1277,21 +1298,141 @@ def run_redshift_create_analytics_views_with_recovery(
 def run_redshift_validate_analytics_with_recovery(
     **context,
 ) -> dict:
-    return run_with_recovery(
-        context=context,
-        stage_name="REDSHIFT_VALIDATE_ANALYTICS",
-        operation=redshift_validate_batch_analytics,
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
     )
+
+    gold_dataset_version_id = (
+        get_or_create_dataset_version(
+            pipeline_run_id=pipeline_run_id,
+            layer="GOLD",
+        )
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="REDSHIFT_VALIDATE_ANALYTICS",
+        input_dataset_version_id=gold_dataset_version_id,
+        output_dataset_version_id=gold_dataset_version_id,
+    )
+
+    try:
+        validation_result = (
+            redshift_validate_batch_analytics()
+        )
+
+        validation_status = normalize_validation_status(
+            validation_result[
+                "redshift_batch_analytics_validation_status"
+            ]
+        )
+
+        record_validation_result(
+            dataset_version_id=gold_dataset_version_id,
+            validation_name="REDSHIFT_VALIDATE_ANALYTICS",
+            status=validation_status,
+            metrics=validation_result,
+            stage_execution_id=stage_execution_id,
+            report_path=None,
+        )
+
+        if validation_status == "FAIL":
+            raise RuntimeError(
+                "Redshift analytics validation returned FAIL."
+            )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=True,
+        )
+
+    except Exception as exc:
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=str(exc),
+        )
+
+        raise
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "dataset_version_id": gold_dataset_version_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "REDSHIFT_VALIDATE_ANALYTICS",
+        "status": "SUCCEEDED",
+        "validation_result": validation_result,
+    }
 
 
 def run_cross_layer_validation_with_recovery(
     **context,
 ) -> dict:
-    return run_with_recovery(
-        context=context,
-        stage_name="CROSS_LAYER_VALIDATION",
-        operation=run_batch_cross_layer_validation,
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
     )
+
+    gold_dataset_version_id = (
+        get_or_create_dataset_version(
+            pipeline_run_id=pipeline_run_id,
+            layer="GOLD",
+        )
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="CROSS_LAYER_VALIDATION",
+        input_dataset_version_id=gold_dataset_version_id,
+        output_dataset_version_id=gold_dataset_version_id,
+    )
+
+    try:
+        validation_result = (
+            run_batch_cross_layer_validation()
+        )
+
+        validation_status = validation_result["status"]
+
+        record_validation_result(
+            dataset_version_id=gold_dataset_version_id,
+            validation_name="CROSS_LAYER_VALIDATION",
+            status=validation_status,
+            metrics=validation_result,
+            stage_execution_id=stage_execution_id,
+            report_path=None,
+        )
+
+        if validation_status == "FAIL":
+            raise RuntimeError(
+                "Cross-layer validation returned FAIL."
+            )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=True,
+        )
+
+    except Exception as exc:
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=str(exc),
+        )
+
+        raise
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "dataset_version_id": gold_dataset_version_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "CROSS_LAYER_VALIDATION",
+        "status": "SUCCEEDED",
+        "validation_result": validation_result,
+    }
 
 
 def upload_batch_gold_to_s3() -> dict:
@@ -1417,7 +1558,7 @@ def redshift_validate_batch_analytics() -> dict:
     )
 
 
-def run_batch_cross_layer_validation() -> None:
+def run_batch_cross_layer_validation() -> dict:
     result = subprocess.run(
         [
             "python",
@@ -1434,6 +1575,8 @@ def run_batch_cross_layer_validation() -> None:
         text=True,
     )
 
+    print(result.stdout)
+
     if result.returncode != 0:
         raise RuntimeError(
             "Batch cross-layer validation failed.\n"
@@ -1442,7 +1585,11 @@ def run_batch_cross_layer_validation() -> None:
             f"STDERR:\n{result.stderr}"
         )
 
-    print(result.stdout)
+    return {
+        "status": "PASS",
+        "return_code": result.returncode,
+        "stdout": result.stdout.strip(),
+    }
 
 
 with DAG(
