@@ -1,6 +1,8 @@
 import os
 import subprocess
+import json
 
+from psycopg2.extras import Json
 from datetime import datetime, timedelta
 from pathlib import Path
 from airflow import DAG
@@ -290,6 +292,53 @@ def finish_recovery_stage(
             )
 
 
+def publish_gold_outputs() -> None:
+    command = f"""
+import sys
+from pathlib import Path
+
+batch_root = Path({BATCH_ETL_PATH!r})
+checks_path = batch_root / "scripts" / "checks"
+
+sys.path.insert(0, str(checks_path))
+sys.path.insert(0, str(batch_root))
+
+from check_gold_outputs import publish_gold_candidate
+
+publish_gold_candidate()
+
+print(
+    "Gold candidate set published successfully."
+)
+"""
+
+    result = subprocess.run(
+        [
+            "python",
+            "-c",
+            command,
+        ],
+        cwd=BATCH_ETL_PATH,
+        env={
+            **os.environ,
+            "PYTHONPATH": BATCH_ETL_PATH,
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    print(result.stdout)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Gold publish task failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+
 def run_transform_silver_with_recovery(
     **context,
 ) -> dict:
@@ -451,6 +500,46 @@ def run_check_silver_with_recovery(**context) -> dict:
 
         raise
 
+    validation_status = validation_result["status"]
+
+    record_validation_result(
+        dataset_version_id=dataset_version_id,
+        validation_name="CHECK_SILVER",
+        status=validation_status,
+        metrics=validation_result,
+        stage_execution_id=stage_execution_id,
+        report_path=validation_result.get(
+            "report_path"
+        ),
+    )
+
+    if validation_status == "FAIL":
+        update_dataset_version_status(
+            dataset_version_id,
+            "FAILED",
+        )
+
+        error_message = (
+            "CHECK_SILVER validation returned FAIL."
+        )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=error_message,
+        )
+
+        raise RuntimeError(error_message)
+
+    BATCH_SILVER_CANDIDATE_FILE.replace(
+        BATCH_SILVER_FINAL_FILE
+    )
+
+    print(
+        "Silver candidate published to: "
+        f"{BATCH_SILVER_FINAL_FILE}"
+    )
+
     update_dataset_version_status(
         dataset_version_id,
         "PUBLISHED",
@@ -482,6 +571,64 @@ def run_check_silver_with_recovery(**context) -> dict:
         "status": "SUCCEEDED",
         "validation_result": validation_result,
     }
+
+
+def record_validation_result(
+    *,
+    dataset_version_id: int,
+    validation_name: str,
+    status: str,
+    metrics: dict,
+    stage_execution_id: int | None = None,
+    report_path: str | None = None,
+) -> None:
+    allowed_statuses = {
+        "PASS",
+        "PASS_WITH_WARNINGS",
+        "FAIL",
+    }
+
+    if status not in allowed_statuses:
+        raise ValueError(
+            f"Unsupported validation status: {status}"
+        )
+
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO recovery.validation_results (
+                    dataset_version_id,
+                    validation_name,
+                    status,
+                    metrics,
+                    report_path,
+                    stage_execution_id
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                );
+                """,
+                (
+                    dataset_version_id,
+                    validation_name,
+                    status,
+                    Json(
+                        metrics,
+                        dumps=lambda value: json.dumps(
+                            value,
+                            default=str,
+                        ),
+                    ),
+                    report_path,
+                    stage_execution_id,
+                ),
+            )
 
 
 def get_or_create_dataset_version(
@@ -726,6 +873,7 @@ def get_or_create_gold_artifacts(
 
 def validate_silver_output() -> dict:
     command = f"""
+import json
 import sys
 from pathlib import Path
 
@@ -741,10 +889,6 @@ candidate_file = Path(
     {str(BATCH_SILVER_CANDIDATE_FILE)!r}
 )
 
-final_file = Path(
-    {str(BATCH_SILVER_FINAL_FILE)!r}
-)
-
 result = check_silver_output(
     silver_file=candidate_file
 )
@@ -753,17 +897,19 @@ print(
     f"Silver validation status: {{result['status']}}"
 )
 
+print(
+    "__VALIDATION_RESULT__="
+    + json.dumps(
+        result,
+        default=str,
+    )
+)
+
 if result["status"] == "FAIL":
     raise RuntimeError(
         "Silver validation failed: "
         + "; ".join(result["critical_failures"])
     )
-
-candidate_file.replace(final_file)
-
-print(
-    f"Silver candidate published to: {{final_file}}"
-)
 """
 
     result = subprocess.run(
@@ -792,14 +938,23 @@ print(
             f"STDERR:\n{result.stderr}"
         )
 
-    return {
-        "validation_status": "passed",
-        "stdout": result.stdout.strip(),
-    }
+    validation_prefix = "__VALIDATION_RESULT__="
+
+    for line in result.stdout.splitlines():
+        if line.startswith(validation_prefix):
+            return json.loads(
+                line.removeprefix(validation_prefix)
+            )
+
+    raise RuntimeError(
+        "Silver validation completed, "
+        "but no structured validation result was returned."
+    )
 
 
 def validate_gold_outputs() -> dict:
     command = f"""
+import json
 import sys
 from pathlib import Path
 
@@ -809,10 +964,7 @@ checks_path = batch_root / "scripts" / "checks"
 sys.path.insert(0, str(checks_path))
 sys.path.insert(0, str(batch_root))
 
-from check_gold_outputs import (
-    check_gold_outputs,
-    publish_gold_candidate,
-)
+from check_gold_outputs import check_gold_outputs
 
 result = check_gold_outputs()
 
@@ -820,17 +972,19 @@ print(
     f"Gold validation status: {{result['status']}}"
 )
 
+print(
+    "__VALIDATION_RESULT__="
+    + json.dumps(
+        result,
+        default=str,
+    )
+)
+
 if result["status"] == "FAIL":
     raise RuntimeError(
         "Gold validation failed. "
         f"Failed marts: {{result['failed_mart_count']}}"
     )
-
-publish_gold_candidate()
-
-print(
-    "Gold candidate set published successfully."
-)
 """
 
     result = subprocess.run(
@@ -859,10 +1013,18 @@ print(
             f"STDERR:\n{result.stderr}"
         )
 
-    return {
-        "validation_status": "passed",
-        "stdout": result.stdout.strip(),
-    }
+    validation_prefix = "__VALIDATION_RESULT__="
+
+    for line in result.stdout.splitlines():
+        if line.startswith(validation_prefix):
+            return json.loads(
+                line.removeprefix(validation_prefix)
+            )
+
+    raise RuntimeError(
+        "Gold validation completed, "
+        "but no structured validation result was returned."
+    )
 
 
 def run_build_gold_with_recovery(**context) -> dict:
@@ -999,6 +1161,47 @@ def run_check_gold_with_recovery(**context) -> dict:
     try:
         validation_result = validate_gold_outputs()
 
+        validation_status = validation_result["status"]
+
+        record_validation_result(
+            dataset_version_id=dataset_version_id,
+            validation_name="CHECK_GOLD",
+            status=validation_status,
+            metrics=validation_result,
+            stage_execution_id=stage_execution_id,
+            report_path=validation_result.get(
+                "report_path"
+            ),
+        )
+
+        if validation_status == "FAIL":
+            raise RuntimeError(
+                "CHECK_GOLD validation returned FAIL."
+            )
+
+        publish_gold_outputs()
+
+        update_dataset_version_status(
+            dataset_version_id,
+            "PUBLISHED",
+        )
+
+        with get_recovery_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE recovery.dataset_artifacts
+                    SET status = 'PUBLISHED'
+                    WHERE dataset_version_id = %s;
+                    """,
+                    (dataset_version_id,),
+                )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=True,
+        )
+
     except Exception as exc:
         update_dataset_version_status(
             dataset_version_id,
@@ -1012,27 +1215,6 @@ def run_check_gold_with_recovery(**context) -> dict:
         )
 
         raise
-
-    update_dataset_version_status(
-        dataset_version_id,
-        "PUBLISHED",
-    )
-
-    with get_recovery_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE recovery.dataset_artifacts
-                SET status = 'PUBLISHED'
-                WHERE dataset_version_id = %s;
-                """,
-                (dataset_version_id,),
-            )
-
-    finish_recovery_stage(
-        stage_execution_id=stage_execution_id,
-        success=True,
-    )
 
     return {
         "pipeline_run_id": pipeline_run_id,
