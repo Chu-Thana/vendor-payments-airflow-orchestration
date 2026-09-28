@@ -1,6 +1,7 @@
 import os
 import subprocess
 import json
+import hashlib
 
 from psycopg2.extras import Json
 from datetime import datetime, timedelta
@@ -420,9 +421,15 @@ def run_transform_silver_with_recovery(
             error_message
         )
 
+    artifact_metadata = calculate_csv_artifact_metadata(
+        BATCH_SILVER_CANDIDATE_FILE
+    )
+
     finish_recovery_artifact(
-        artifact_execution_id,
-        True,
+        artifact_execution_id=artifact_execution_id,
+        success=True,
+        row_count=artifact_metadata["row_count"],
+        checksum=artifact_metadata["checksum"],
     )
 
     update_dataset_version_status(
@@ -952,6 +959,40 @@ def recover_stale_running_stage(
     )
 
 
+def calculate_csv_artifact_metadata(
+    file_path: Path,
+) -> dict:
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Artifact file not found: {file_path}"
+        )
+
+    row_count = 0
+
+    with file_path.open(
+        "r",
+        encoding="utf-8",
+        newline="",
+    ) as file:
+        # ลบ header ออก 1 แถว
+        next(file, None)
+
+        for _ in file:
+            row_count += 1
+
+    checksum = hashlib.sha256()
+
+    with file_path.open("rb") as file:
+        for chunk in iter(
+            lambda: file.read(1024 * 1024),
+            b"",
+        ):
+            checksum.update(chunk)
+
+    return {
+        "row_count": row_count,
+        "checksum": checksum.hexdigest(),
+    }
 def get_or_create_gold_artifacts(
     dataset_version_id: int,
 ) -> dict[str, int]:
@@ -1163,11 +1204,15 @@ def run_build_gold_with_recovery(**context) -> dict:
                 artifact_id
             )
         )
-
+        
     stage_execution_id = start_recovery_stage(
         pipeline_run_id=pipeline_run_id,
         stage_name="BUILD_GOLD",
         output_dataset_version_id=dataset_version_id,
+    )
+
+    pending_artifact_execution_ids = set(
+        artifact_execution_ids.values()
     )
 
     result = subprocess.run(
@@ -1196,11 +1241,11 @@ def run_build_gold_with_recovery(**context) -> dict:
         )
 
         for artifact_execution_id in (
-            artifact_execution_ids.values()
+                pending_artifact_execution_ids
         ):
             finish_recovery_artifact(
-                artifact_execution_id,
-                False,
+                artifact_execution_id=artifact_execution_id,
+                success=False,
                 error_message=error_message,
             )
 
@@ -1217,12 +1262,79 @@ def run_build_gold_with_recovery(**context) -> dict:
 
         raise RuntimeError(error_message)
 
-    for artifact_execution_id in (
-        artifact_execution_ids.values()
+    gold_candidate_dir = (
+            Path(BATCH_ETL_PATH)
+            / "data"
+            / "processed"
+            / "gold_candidate"
+    )
+
+    artifact_metadata_by_name = {}
+
+    try:
+        for artifact_name in artifact_ids:
+            artifact_path = (
+                    gold_candidate_dir
+                    / artifact_name
+            )
+
+            artifact_metadata_by_name[
+                artifact_name
+            ] = calculate_csv_artifact_metadata(
+                artifact_path
+            )
+
+    except Exception as exc:
+        error_message = (
+            "Gold artifact metadata calculation failed: "
+            f"{exc}"
+        )
+
+        for artifact_execution_id in (
+                pending_artifact_execution_ids
+        ):
+            finish_recovery_artifact(
+                artifact_execution_id=artifact_execution_id,
+                success=False,
+                error_message=error_message,
+            )
+
+        update_dataset_version_status(
+            dataset_version_id,
+            "FAILED",
+        )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=error_message,
+        )
+
+        raise
+
+    for artifact_name, artifact_execution_id in (
+            artifact_execution_ids.items()
     ):
+        metadata = artifact_metadata_by_name[
+            artifact_name
+        ]
+
         finish_recovery_artifact(
-            artifact_execution_id,
-            True,
+            artifact_execution_id=artifact_execution_id,
+            success=True,
+            row_count=metadata["row_count"],
+            checksum=metadata["checksum"],
+        )
+
+        pending_artifact_execution_ids.discard(
+            artifact_execution_id
+        )
+
+        print(
+            "Gold artifact completed: "
+            f"{artifact_name}, "
+            f"row_count={metadata['row_count']}, "
+            f"checksum={metadata['checksum']}"
         )
 
     update_dataset_version_status(
