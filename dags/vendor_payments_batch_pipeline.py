@@ -332,6 +332,44 @@ print(
         )
 
 
+def check_recovery_database() -> None:
+    with get_recovery_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    current_database(),
+                    current_user,
+                    EXISTS (
+                        SELECT 1
+                        FROM information_schema.schemata
+                        WHERE schema_name = 'recovery'
+                    );
+                """
+            )
+
+            row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            "Recovery database preflight returned no result."
+        )
+
+    database_name, database_user, recovery_schema_exists = row
+
+    if not recovery_schema_exists:
+        raise RuntimeError(
+            "Recovery schema does not exist."
+        )
+
+    print(
+        "Recovery DB preflight passed: "
+        f"database={database_name}, "
+        f"user={database_user}, "
+        "schema=recovery"
+    )
+
+
 def run_transform_silver_with_recovery(
     **context,
 ) -> dict:
@@ -1875,6 +1913,11 @@ with DAG(
 ) as dag:
     start = EmptyOperator(task_id="start")
 
+    check_recovery_db = PythonOperator(
+        task_id="check_recovery_database",
+        python_callable=check_recovery_database,
+    )
+
     check_batch_etl_scripts = BashOperator(
         task_id="check_batch_etl_scripts",
         bash_command=(
@@ -1950,6 +1993,7 @@ with DAG(
 
     (
             start
+            >> check_recovery_db
             >> check_batch_etl_scripts
             >> transform_silver_task
             >> check_silver_task

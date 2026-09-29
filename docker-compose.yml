@@ -4,6 +4,7 @@ services:
     env_file:
       - .env
     container_name: airflow-postgres
+    restart: unless-stopped
 
     environment:
       POSTGRES_USER: airflow
@@ -79,6 +80,7 @@ services:
     env_file:
       - .env
     container_name: airflow-webserver
+    restart: unless-stopped
 
     depends_on:
       postgres:
@@ -108,6 +110,7 @@ services:
     env_file:
       - .env
     container_name: airflow-scheduler
+    restart: unless-stopped
 
     depends_on:
       postgres:
