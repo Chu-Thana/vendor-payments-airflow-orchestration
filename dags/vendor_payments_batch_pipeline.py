@@ -461,117 +461,6 @@ def run_transform_silver_with_recovery(
     }
 
 
-def run_check_silver_with_recovery(**context) -> dict:
-    dag_run = context["dag_run"]
-
-    pipeline_run_id = get_or_create_recovery_run(
-        airflow_run_id=dag_run.run_id,
-    )
-
-    dataset_version_id = (
-        get_or_create_dataset_version(
-            pipeline_run_id=pipeline_run_id,
-            layer="SILVER",
-        )
-    )
-
-    stage_execution_id = start_recovery_stage(
-        pipeline_run_id=pipeline_run_id,
-        stage_name="CHECK_SILVER",
-        input_dataset_version_id=dataset_version_id,
-        output_dataset_version_id=dataset_version_id,
-    )
-
-    try:
-        validation_result = validate_silver_output()
-
-    except Exception as exc:
-        update_dataset_version_status(
-            dataset_version_id,
-            "FAILED",
-        )
-
-        finish_recovery_stage(
-            stage_execution_id=stage_execution_id,
-            success=False,
-            error_message=str(exc),
-        )
-
-        raise
-
-    validation_status = validation_result["status"]
-
-    record_validation_result(
-        dataset_version_id=dataset_version_id,
-        validation_name="CHECK_SILVER",
-        status=validation_status,
-        metrics=validation_result,
-        stage_execution_id=stage_execution_id,
-        report_path=validation_result.get(
-            "report_path"
-        ),
-    )
-
-    if validation_status == "FAIL":
-        update_dataset_version_status(
-            dataset_version_id,
-            "FAILED",
-        )
-
-        error_message = (
-            "CHECK_SILVER validation returned FAIL."
-        )
-
-        finish_recovery_stage(
-            stage_execution_id=stage_execution_id,
-            success=False,
-            error_message=error_message,
-        )
-
-        raise RuntimeError(error_message)
-
-    BATCH_SILVER_CANDIDATE_FILE.replace(
-        BATCH_SILVER_FINAL_FILE
-    )
-
-    print(
-        "Silver candidate published to: "
-        f"{BATCH_SILVER_FINAL_FILE}"
-    )
-
-    update_dataset_version_status(
-        dataset_version_id,
-        "PUBLISHED",
-    )
-
-    with get_recovery_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE recovery.dataset_artifacts
-                SET status = 'PUBLISHED'
-                WHERE dataset_version_id = %s
-                  AND artifact_name =
-                      'vendor_payments_silver.csv';
-                """,
-                (dataset_version_id,),
-            )
-
-    finish_recovery_stage(
-        stage_execution_id=stage_execution_id,
-        success=True,
-    )
-
-    return {
-        "pipeline_run_id": pipeline_run_id,
-        "dataset_version_id": dataset_version_id,
-        "stage_execution_id": stage_execution_id,
-        "stage_name": "CHECK_SILVER",
-        "status": "SUCCEEDED",
-        "validation_result": validation_result,
-    }
-
-
 def record_validation_result(
     *,
     dataset_version_id: int,
@@ -1019,6 +908,33 @@ def get_or_create_gold_artifacts(
     return artifact_ids
 
 
+def record_validation_failure_safely(
+    *,
+    dataset_version_id: int,
+    validation_name: str,
+    stage_execution_id: int,
+    error: Exception,
+) -> None:
+    try:
+        record_validation_result(
+            dataset_version_id=dataset_version_id,
+            validation_name=validation_name,
+            status="FAIL",
+            metrics={
+                "error_type": type(error).__name__,
+                "error_message": str(error),
+            },
+            stage_execution_id=stage_execution_id,
+            report_path=None,
+        )
+
+    except Exception as metadata_exc:
+        print(
+            "Failed to record validation failure metadata: "
+            f"{metadata_exc}"
+        )
+
+
 def validate_silver_output() -> dict:
     command = f"""
 import json
@@ -1204,7 +1120,7 @@ def run_build_gold_with_recovery(**context) -> dict:
                 artifact_id
             )
         )
-        
+
     stage_execution_id = start_recovery_stage(
         pipeline_run_id=pipeline_run_id,
         stage_name="BUILD_GOLD",
@@ -1358,6 +1274,111 @@ def run_build_gold_with_recovery(**context) -> dict:
     }
 
 
+def run_check_silver_with_recovery(**context) -> dict:
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
+    )
+
+    dataset_version_id = (
+        get_or_create_dataset_version(
+            pipeline_run_id=pipeline_run_id,
+            layer="SILVER",
+        )
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="CHECK_SILVER",
+        input_dataset_version_id=dataset_version_id,
+        output_dataset_version_id=dataset_version_id,
+    )
+
+    validation_recorded = False
+
+    try:
+        validation_result = validate_silver_output()
+
+        validation_status = validation_result["status"]
+
+        record_validation_result(
+            dataset_version_id=dataset_version_id,
+            validation_name="CHECK_SILVER",
+            status=validation_status,
+            metrics=validation_result,
+            stage_execution_id=stage_execution_id,
+            report_path=validation_result.get(
+                "report_path"
+            ),
+        )
+
+        validation_recorded = True
+
+        if validation_status == "FAIL":
+            raise RuntimeError(
+                "CHECK_SILVER validation returned FAIL."
+            )
+
+        BATCH_SILVER_CANDIDATE_FILE.replace(
+            BATCH_SILVER_FINAL_FILE
+        )
+
+        update_dataset_version_status(
+            dataset_version_id,
+            "PUBLISHED",
+        )
+
+        with get_recovery_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE recovery.dataset_artifacts
+                    SET status = 'PUBLISHED'
+                    WHERE dataset_version_id = %s
+                      AND artifact_name =
+                          'vendor_payments_silver.csv';
+                    """,
+                    (dataset_version_id,),
+                )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=True,
+        )
+
+    except Exception as exc:
+        if not validation_recorded:
+            record_validation_failure_safely(
+                dataset_version_id=dataset_version_id,
+                validation_name="CHECK_SILVER",
+                stage_execution_id=stage_execution_id,
+                error=exc,
+            )
+
+        update_dataset_version_status(
+            dataset_version_id,
+            "FAILED",
+        )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=str(exc),
+        )
+
+        raise
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "dataset_version_id": dataset_version_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "CHECK_SILVER",
+        "status": "SUCCEEDED",
+        "validation_result": validation_result,
+    }
+
+
 def run_check_gold_with_recovery(**context) -> dict:
     dag_run = context["dag_run"]
 
@@ -1377,6 +1398,8 @@ def run_check_gold_with_recovery(**context) -> dict:
         output_dataset_version_id=dataset_version_id,
     )
 
+    validation_recorded = False
+
     try:
         validation_result = validate_gold_outputs()
 
@@ -1392,6 +1415,8 @@ def run_check_gold_with_recovery(**context) -> dict:
                 "report_path"
             ),
         )
+
+        validation_recorded = True
 
         if validation_status == "FAIL":
             raise RuntimeError(
@@ -1422,6 +1447,14 @@ def run_check_gold_with_recovery(**context) -> dict:
         )
 
     except Exception as exc:
+        if not validation_recorded:
+            record_validation_failure_safely(
+                dataset_version_id=dataset_version_id,
+                validation_name="CHECK_GOLD",
+                stage_execution_id=stage_execution_id,
+                error=exc,
+            )
+
         update_dataset_version_status(
             dataset_version_id,
             "FAILED",
@@ -1537,6 +1570,8 @@ def run_redshift_validate_analytics_with_recovery(
         output_dataset_version_id=gold_dataset_version_id,
     )
 
+    validation_recorded = False
+
     try:
         validation_result = (
             redshift_validate_batch_analytics()
@@ -1568,6 +1603,14 @@ def run_redshift_validate_analytics_with_recovery(
         )
 
     except Exception as exc:
+        if not validation_recorded:
+            record_validation_failure_safely(
+                dataset_version_id=gold_dataset_version_id,
+                validation_name="REDSHIFT_VALIDATE_ANALYTICS",
+                stage_execution_id=stage_execution_id,
+                error=exc,
+            )
+
         finish_recovery_stage(
             stage_execution_id=stage_execution_id,
             success=False,
@@ -1609,6 +1652,8 @@ def run_cross_layer_validation_with_recovery(
         output_dataset_version_id=gold_dataset_version_id,
     )
 
+    validation_recorded = False
+
     try:
         validation_result = (
             run_batch_cross_layer_validation()
@@ -1636,6 +1681,15 @@ def run_cross_layer_validation_with_recovery(
         )
 
     except Exception as exc:
+
+        if not validation_recorded:
+            record_validation_failure_safely(
+                dataset_version_id=gold_dataset_version_id,
+                validation_name="CROSS_LAYER_VALIDATION",
+                stage_execution_id=stage_execution_id,
+                error=exc,
+            )
+
         finish_recovery_stage(
             stage_execution_id=stage_execution_id,
             success=False,
