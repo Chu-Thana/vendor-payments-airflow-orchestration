@@ -2,6 +2,7 @@ import os
 import subprocess
 import json
 import hashlib
+import sys
 
 from psycopg2.extras import Json
 from datetime import datetime, timedelta
@@ -413,19 +414,23 @@ def run_transform_silver_with_recovery(
         output_dataset_version_id=dataset_version_id,
     )
 
+    env = os.environ.copy()
+
+    env["RECOVERY_DATASET_VERSION_ID"] = str(
+        dataset_version_id
+    )
+
+    env["PYTHONPATH"] = BATCH_ETL_PATH
+
     result = subprocess.run(
         [
-            "python",
-            "scripts/pipeline/transform_silver.py",
+            sys.executable,
+            str(BATCH_TRANSFORM_SILVER_SCRIPT),
         ],
         cwd=BATCH_ETL_PATH,
-        env={
-            **os.environ,
-            "PYTHONPATH": BATCH_ETL_PATH,
-        },
-        check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
 
     print(result.stdout)
