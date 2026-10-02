@@ -1174,19 +1174,23 @@ def run_build_gold_with_recovery(**context) -> dict:
         artifact_execution_ids.values()
     )
 
+    env = os.environ.copy()
+
+    env["RECOVERY_DATASET_VERSION_ID"] = str(
+        dataset_version_id
+    )
+
+    env["PYTHONPATH"] = BATCH_ETL_PATH
+
     result = subprocess.run(
         [
-            "python",
-            "scripts/pipeline/build_gold_marts.py",
+            sys.executable,
+            str(BATCH_BUILD_GOLD_SCRIPT),
         ],
         cwd=BATCH_ETL_PATH,
-        env={
-            **os.environ,
-            "PYTHONPATH": BATCH_ETL_PATH,
-        },
-        check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
 
     print(result.stdout)
