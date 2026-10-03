@@ -78,6 +78,15 @@ services:
       <<: *airflow-common-env
     user: "${AIRFLOW_UID:-50000}:0"
     volumes: *airflow-common-volumes
+<<<<<<< Updated upstream
+=======
+
+    networks:
+      - default
+      - vendor-payments-shared
+      - vendor-payments-network
+
+>>>>>>> Stashed changes
     ports:
       - "8080:8080"
     command: webserver
@@ -97,7 +106,26 @@ services:
       <<: *airflow-common-env
     user: "${AIRFLOW_UID:-50000}:0"
     volumes: *airflow-common-volumes
+<<<<<<< Updated upstream
     command: scheduler
 
 volumes:
   postgres-db-volume:
+=======
+
+    networks:
+      - default
+      - vendor-payments-shared
+      - vendor-payments-network
+
+    command: scheduler
+
+volumes:
+  postgres-db-volume:
+
+networks:
+  vendor-payments-shared:
+    external: true
+  vendor-payments-network:
+    external: true
+>>>>>>> Stashed changes
