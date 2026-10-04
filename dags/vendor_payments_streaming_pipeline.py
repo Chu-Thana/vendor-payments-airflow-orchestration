@@ -972,12 +972,8 @@ with DAG(
             >> streaming_cross_layer_validation_task
             >> publish_latest_streaming_pointer_task
             >> mark_processed_task
-<<<<<<< Updated upstream
-    )
-=======
             >> choose_next_action_task
     )
 
     choose_next_action_task >> trigger_next_window_task
     choose_next_action_task >> streaming_complete_task
->>>>>>> Stashed changes
