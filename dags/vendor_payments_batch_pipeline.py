@@ -1912,6 +1912,120 @@ def run_batch_cross_layer_validation() -> dict:
     }
 
 
+def run_batch_grouped_cross_layer_validation() -> dict:
+    result = subprocess.run(
+        [
+            "python",
+            "-m",
+            "scripts.validation.run_batch_grouped_cross_layer_validation",
+        ],
+        cwd=str(CLOUD_PLATFORM_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(CLOUD_PLATFORM_ROOT),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    print(result.stdout)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Batch grouped cross-layer validation failed.\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    return {
+        "status": "PASS",
+        "return_code": result.returncode,
+        "stdout": result.stdout.strip(),
+    }
+
+
+def run_grouped_cross_layer_validation_with_recovery(
+    **context,
+) -> dict:
+    dag_run = context["dag_run"]
+
+    pipeline_run_id = get_or_create_recovery_run(
+        airflow_run_id=dag_run.run_id,
+    )
+
+    gold_dataset_version_id = (
+        get_or_create_dataset_version(
+            pipeline_run_id=pipeline_run_id,
+            layer="GOLD",
+        )
+    )
+
+    stage_execution_id = start_recovery_stage(
+        pipeline_run_id=pipeline_run_id,
+        stage_name="GROUPED_CROSS_LAYER_VALIDATION",
+        input_dataset_version_id=gold_dataset_version_id,
+        output_dataset_version_id=gold_dataset_version_id,
+    )
+
+    validation_recorded = False
+
+    try:
+        validation_result = (
+            run_batch_grouped_cross_layer_validation()
+        )
+
+        validation_status = validation_result["status"]
+
+        record_validation_result(
+            dataset_version_id=gold_dataset_version_id,
+            validation_name="GROUPED_CROSS_LAYER_VALIDATION",
+            status=validation_status,
+            metrics=validation_result,
+            stage_execution_id=stage_execution_id,
+            report_path=None,
+        )
+
+        validation_recorded = True
+
+        if validation_status == "FAIL":
+            raise RuntimeError(
+                "Grouped cross-layer validation returned FAIL."
+            )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=True,
+        )
+
+    except Exception as exc:
+        if not validation_recorded:
+            record_validation_failure_safely(
+                dataset_version_id=gold_dataset_version_id,
+                validation_name="GROUPED_CROSS_LAYER_VALIDATION",
+                stage_execution_id=stage_execution_id,
+                error=exc,
+            )
+
+        finish_recovery_stage(
+            stage_execution_id=stage_execution_id,
+            success=False,
+            error_message=str(exc),
+        )
+
+        raise
+
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "dataset_version_id": gold_dataset_version_id,
+        "stage_execution_id": stage_execution_id,
+        "stage_name": "GROUPED_CROSS_LAYER_VALIDATION",
+        "status": "SUCCEEDED",
+        "validation_result": validation_result,
+    }
+
+
 with DAG(
     dag_id="vendor_payments_batch_pipeline",
     start_date=datetime(2026, 1, 1),
@@ -1998,6 +2112,11 @@ with DAG(
         python_callable=run_cross_layer_validation_with_recovery,
     )
 
+    batch_grouped_cross_layer_validation_task = PythonOperator(
+        task_id="validate_batch_grouped_cross_layer",
+        python_callable=run_grouped_cross_layer_validation_with_recovery,
+    )
+
     end = EmptyOperator(task_id="end")
 
     (
@@ -2015,5 +2134,6 @@ with DAG(
             >> redshift_create_batch_analytics_views_task
             >> redshift_validate_batch_analytics_task
             >> batch_cross_layer_validation_task
+            >> batch_grouped_cross_layer_validation_task
             >> end
     )
