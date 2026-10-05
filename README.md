@@ -2,8 +2,8 @@
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
 ![Apache Airflow](https://img.shields.io/badge/Orchestration-Apache%20Airflow-017CEE?logo=apacheairflow&logoColor=white)
-![Batch](https://img.shields.io/badge/Batch-Pipeline-2E86C1)
-![Streaming](https://img.shields.io/badge/Streaming-Bounded%20Windows-purple)
+![Batch](https://img.shields.io/badge/Batch-Recovery--Aware-2E86C1)
+![Streaming](https://img.shields.io/badge/Streaming-Automated%20Windows-purple)
 ![Storage](https://img.shields.io/badge/Storage-Amazon%20S3-569A31?logo=amazons3&logoColor=white)
 ![Warehouse](https://img.shields.io/badge/Warehouse-Redshift-8C4FFF)
 ![Validation](https://img.shields.io/badge/Validation-Athena%20↔%20Redshift-1F77B4)
@@ -12,15 +12,19 @@
 ![Container](https://img.shields.io/badge/Container-Docker-2496ED?logo=docker&logoColor=white)
 ![CI](https://github.com/Chu-Thana/vendor-payments-airflow-orchestration/actions/workflows/ci.yml/badge.svg)
 
-Apache Airflow orchestration layer for the Vendor Payments data platform.
+Apache Airflow orchestration layer for the Vendor Payments Data Platform.
 
-The current architecture separates **Batch**, **Streaming**, and **Platform-level coordination** into three focused DAGs. Batch and Streaming execute independently and publish their own outputs. The Main Platform DAG does not rerun either pipeline; instead, it checks their latest successful Airflow run states and then performs platform readiness checks, Redshift metadata validation, and final orchestration reporting.
+The final architecture separates **Batch**, **Streaming**, and **Platform-level orchestration** into three focused DAGs.
+
+- The **Batch DAG** coordinates recovery-aware ETL, validation gates, Amazon S3 publishing, Amazon Redshift processing, and Athena ↔ Redshift reconciliation.
+- The **Streaming DAG** automatically processes bounded windows through Kafka producer and consumer execution, downstream transformation, cloud processing, validation, completion markers, and next-window triggering.
+- The **Platform Orchestration DAG** verifies the latest Batch and Streaming pipeline states before performing platform-readiness checks and final execution reporting.
 
 ---
 
 ## 📌 Project Summary
 
-The current version replaces the previous single large cross-platform DAG with three independent orchestration lifecycles:
+The repository contains three active orchestration lifecycles:
 
 ```text
 vendor_payments_batch_pipeline
@@ -28,36 +32,43 @@ vendor_payments_streaming_pipeline
 vendor_payments_data_platform_orchestration
 ```
 
-This separation allows Batch and Streaming workloads to keep different processing lifecycles while preserving a platform-level coordination layer.
+This separation allows Batch and Streaming workloads to operate with different processing lifecycles while preserving a shared platform-level coordination layer.
 
 Airflow is responsible for:
 
-* Running and validating the full Batch ETL lifecycle
-* Publishing validated Batch Gold data to Amazon S3
-* Loading Batch data into Amazon Redshift
-* Validating Batch analytics outputs
-* Running Athena ↔ Redshift Batch cross-layer validation
-* Discovering completed Streaming windows using `_SUCCESS`
-* Ignoring windows already marked `_PROCESSED`
-* Processing one completed bounded Streaming window at a time
-* Publishing per-window curated Streaming data to S3
-* Loading Streaming data into Redshift
-* Validating Streaming analytics outputs
-* Running Athena ↔ Redshift Streaming cross-layer validation
-* Publishing `latest.json`
-* Creating `_PROCESSED` after downstream Streaming completion
-* Checking latest Batch and Streaming DAG run states
-* Checking cloud-platform readiness
-* Generating and validating Redshift execution metadata
-* Generating a final machine-readable orchestration summary
-* Providing observable execution through the Airflow UI
-* Enforcing automated tests, Ruff linting, and GitHub Actions CI
+- Coordinating recovery-aware Batch execution
+- Running Silver and Gold validation gates
+- Publishing validated Batch Gold datasets to Amazon S3
+- Loading Batch data into Amazon Redshift
+- Creating and validating Batch analytics views
+- Running Athena ↔ Redshift summary reconciliation
+- Running grouped Batch cross-layer validation
+- Discovering the next unprocessed Streaming window
+- Running the Kafka producer for that window
+- Running the Kafka consumer with Redis deduplication
+- Verifying the Streaming `_SUCCESS` completion marker
+- Transforming and publishing curated Streaming outputs
+- Loading Streaming data into Redshift
+- Validating Streaming analytics and cross-layer metrics
+- Publishing `latest.json`
+- Creating `_PROCESSED`
+- Triggering the next Streaming window automatically
+- Checking latest Batch and Streaming DAG run states
+- Checking cloud-platform readiness
+- Generating and validating Redshift execution metadata
+- Generating a machine-readable platform orchestration summary
+- Providing execution observability through the Airflow UI
+- Enforcing automated tests, Ruff linting, and GitHub Actions CI
 
 The core design principle is:
 
 ```text
-Batch and Streaming own their processing lifecycles.
-The Main DAG owns platform-level coordination and reporting.
+Batch and Streaming own their processing logic.
+
+Airflow owns execution order,
+validation gates,
+lifecycle control,
+and platform-level coordination.
 ```
 
 ---
@@ -67,67 +78,91 @@ The Main DAG owns platform-level coordination and reporting.
 ![Vendor Payments Airflow Orchestration Architecture](assets/vendor-payments-orchestration/final-orchestration/00_airflow_architecture.png)
 
 ```text
-Batch Pipeline DAG ───────┐
-                          ├──→ Pipeline Status Checks
-Streaming Pipeline DAG ───┘
-                                  ↓
-                         Platform Orchestration
+Batch ETL Pipeline DAG ───────────────┐
+                                      │
+Streaming Pipeline DAG ───────────────┼──→ Platform Orchestration DAG
+                                      │
+                                      └──→ Pipeline state / readiness checks
 ```
 
-### Control Flow vs Data Flow
-
-The three DAGs are connected through **Airflow run state**, not by passing Batch or Streaming datasets directly into the Main DAG.
+### Batch Lifecycle
 
 ```text
-DATA FLOW
-
-Batch DAG
+Raw
+→ Silver
+→ Silver Validation
+→ Gold
+→ Gold Validation
 → S3
 → Redshift
-→ Athena validation
-
-Streaming DAG
-→ S3
-→ Redshift
-→ Athena validation
-→ latest.json
-→ _PROCESSED
-
-
-CONTROL FLOW
-
-Latest Batch DAG run state ───────┐
-                                  ├──→ Main Platform DAG
-Latest Streaming DAG run state ───┘
+→ Athena ↔ Redshift Validation
+→ Grouped Cross-Layer Validation
 ```
 
-The Main Platform DAG queries Airflow metadata to verify that the latest Batch and Streaming runs are successful before continuing with platform-level checks and reporting.
+### Streaming Lifecycle
+
+```text
+Next Unprocessed Window
+→ Kafka Producer
+→ Kafka
+→ Kafka Consumer
+→ Redis Deduplication
+→ _SUCCESS
+→ Curated Processing
+→ S3
+→ Redshift
+→ Athena ↔ Redshift Validation
+→ latest.json
+→ _PROCESSED
+→ Trigger Next Window
+```
+
+### Platform Coordination
+
+```text
+Latest Batch DAG State ────────┐
+                               ├──→ Platform Orchestration DAG
+Latest Streaming DAG State ────┘
+                                  ↓
+                           Cloud Readiness
+                                  ↓
+                         Redshift Summary
+                                  ↓
+                      Execution Validation
+                                  ↓
+                     Orchestration Summary
+```
+
+The Platform DAG uses Airflow run metadata for coordination rather than passing Batch or Streaming datasets directly between DAGs.
 
 ---
 
 ## 📊 Current DAG Metrics
 
 | DAG | Tasks | Latest Verified Result |
-| --- | ---: | --- |
-| `vendor_payments_batch_pipeline` | 13 | Success |
-| `vendor_payments_streaming_pipeline` | 13 | Success |
+|---|---:|---|
+| `vendor_payments_batch_pipeline` | 16 | Success |
+| `vendor_payments_streaming_pipeline` | 19 | Success |
 | `vendor_payments_data_platform_orchestration` | 8 | Success |
-| **Total across 3 DAGs** | **34** | **Validated** |
+| **Total across 3 DAGs** | **43** | **Validated** |
 
 Additional validation:
 
 | Metric | Result |
-| --- | --- |
+|---|---|
 | Automated tests | 17 passed |
 | Ruff linting | PASS |
 | Batch Athena ↔ Redshift validation | PASS |
+| Batch grouped cross-layer validation | PASS |
 | Streaming Athena ↔ Redshift validation | PASS |
-| Main Platform DAG | Success |
+| Platform Orchestration DAG | Success |
 | GitHub Actions CI | Success |
 
 ---
 
 ## ⚙️ DAG Overview
+
+![Airflow DAG List](assets/vendor-payments-orchestration/final-orchestration/01_airflow_dag_list.png)
 
 The repository contains three active DAGs:
 
@@ -137,13 +172,17 @@ vendor_payments_streaming_pipeline
 vendor_payments_data_platform_orchestration
 ```
 
-![Airflow DAG List](assets/vendor-payments-orchestration/final-orchestration/01_airflow_dag_list.png)
+The current portfolio environment uses:
 
-They use `schedule=None` in the current portfolio environment and are triggered manually for reproducible validation.
+```text
+schedule=None
+```
+
+Runs are triggered manually for reproducible validation, while the Streaming DAG can trigger its next bounded-window run automatically.
 
 ---
 
-## 🟦 Batch Pipeline DAG
+# 🟦 Batch ETL Pipeline DAG
 
 DAG ID:
 
@@ -151,14 +190,16 @@ DAG ID:
 vendor_payments_batch_pipeline
 ```
 
-The Batch DAG owns the full Batch lifecycle:
+The Batch DAG coordinates a recovery-aware ETL lifecycle with explicit validation gates.
 
 ```text
 start
-→ check_batch_etl_source
-→ run_vendor_payments_pipeline
-→ check_silver_output
-→ check_gold_outputs
+→ check_recovery_database
+→ check_batch_etl_scripts
+→ transform_silver
+→ check_silver
+→ build_gold
+→ check_gold
 → upload_batch_gold_to_s3
 → redshift_create_schemas
 → redshift_create_batch_landing_tables
@@ -166,33 +207,67 @@ start
 → redshift_create_batch_analytics_views
 → redshift_validate_batch_analytics
 → validate_batch_cross_layer
+→ validate_batch_grouped_cross_layer
 → end
 ```
 
-Responsibilities:
+### Responsibilities
 
-* Run the upstream Vendor Payments ETL pipeline
-* Validate Silver and Gold outputs
-* Publish validated Gold marts to S3
-* Create Redshift schemas and Batch landing tables
-* Load Batch data from S3 into Redshift
-* Create Batch analytics views
-* Validate Redshift Batch analytics
-* Compare Batch metrics between Athena and Redshift
+- Verify Recovery DB availability
+- Verify required Batch ETL scripts
+- Build Silver candidate output
+- Validate Silver before publication
+- Build Gold candidate marts
+- Validate Gold before publication
+- Publish validated Gold outputs
+- Upload Gold datasets to Amazon S3
+- Create Redshift schemas and landing tables
+- COPY Batch datasets from S3
+- Create Batch analytics views
+- Validate warehouse analytics
+- Compare summary metrics between Athena and Redshift
+- Compare grouped metrics across:
+  - `fiscal_year`
+  - `department`
+  - `fund_category`
+- Record recovery-stage execution metadata
 
-Latest verified result:
+### Recovery-Aware Execution
+
+Batch execution uses PostgreSQL Recovery metadata to track pipeline and stage state.
+
+The pipeline separates transformation from validation:
 
 ```text
-Tasks: 13
+TRANSFORM_SILVER
+→ CHECK_SILVER
+→ BUILD_GOLD
+→ CHECK_GOLD
+→ UPLOAD_S3
+→ REDSHIFT...
+→ CROSS_LAYER_VALIDATION
+→ GROUPED_CROSS_LAYER_VALIDATION
+```
+
+Silver and Gold use candidate-first publication so incomplete or failed outputs do not replace trusted published datasets.
+
+### Latest Verified Result
+
+```text
 Status: success
+Recovery checks: PASS
+Silver validation: PASS
+Gold validation: PASS
+Redshift validation: PASS
 Cross-layer validation: PASS
+Grouped cross-layer validation: PASS
 ```
 
 ![Batch DAG Success](assets/vendor-payments-orchestration/final-orchestration/02_batch_dag_success.png)
 
 ---
 
-## 🟪 Streaming Pipeline DAG
+# 🟪 Streaming Pipeline DAG
 
 DAG ID:
 
@@ -200,10 +275,15 @@ DAG ID:
 vendor_payments_streaming_pipeline
 ```
 
-The Streaming DAG processes one completed bounded Streaming window.
+The Streaming DAG now owns the complete bounded-window orchestration lifecycle.
+
+Instead of requiring the Producer and Consumer to be started manually for each window, Airflow selects the next unprocessed input window and coordinates the full flow.
 
 ```text
-discover_completed_streaming_window
+discover_next_streaming_window
+→ produce_streaming_window
+→ consume_streaming_window
+→ verify_streaming_window_complete
 → extract_vendor_payments_staging
 → transform_vendor_payments_staging
 → load_vendor_payments_summary
@@ -216,41 +296,111 @@ discover_completed_streaming_window
 → validate_streaming_cross_layer
 → publish_latest_streaming_pointer
 → mark_streaming_window_processed
+→ choose_next_streaming_action
 ```
 
-Window discovery condition:
+The final branch determines whether another bounded window remains:
 
 ```text
-has _SUCCESS
-and
-does not have _PROCESSED
-```
-
-Responsibilities:
-
-* Discover one completed Streaming window
-* Extract staged events
-* Transform the bounded window into curated output
-* Publish per-window curated data to S3
-* Load the selected window into Redshift
-* Create and validate Streaming analytics views
-* Compare Athena and Redshift metrics
-* Publish `latest.json`
-* Create `_PROCESSED`
-
-Latest verified result:
-
-```text
-Tasks: 13
-Status: success
-Cross-layer validation: PASS
+choose_next_streaming_action
+├──→ trigger_next_streaming_window
+└──→ streaming_pipeline_complete
 ```
 
 ![Streaming DAG Success](assets/vendor-payments-orchestration/final-orchestration/03_streaming_dag_success.png)
 
 ---
 
-## 🟧 Platform Orchestration DAG
+## 🪟 Automated Bounded Windows
+
+The Streaming repository provides three deterministic bounded windows:
+
+```text
+stream_window_001
+stream_window_002
+stream_window_003
+```
+
+Each contains:
+
+```text
+100,000 source records
+```
+
+For each window, the Producer injects:
+
+```text
+5,000 retry/replay duplicates
+```
+
+giving:
+
+```text
+105,000 business events
++ 1 stream_window_complete control event
+```
+
+The Consumer:
+
+- reads Kafka events
+- validates required fields
+- performs Redis `event_id` deduplication
+- writes accepted events to window-specific JSONL staging
+- commits offsets manually
+- creates `_SUCCESS` when the expected window count is complete
+
+Airflow then processes the completed window and creates:
+
+```text
+_PROCESSED
+```
+
+after downstream work succeeds.
+
+### Lifecycle Markers
+
+```text
+_SUCCESS
+= Kafka consumer ingestion is complete
+
+_PROCESSED
+= downstream Airflow processing is complete
+```
+
+### Automated Progression
+
+```text
+stream_window_001
+→ stream_window_002
+→ stream_window_003
+→ complete
+```
+
+![Streaming Window Progression](assets/vendor-payments-orchestration/final-orchestration/07_streaming_window_progression.png)
+
+This creates a retry-safe bounded-window lifecycle without requiring each window to be started manually.
+
+---
+
+## ☁️ Streaming Cloud Processing
+
+After `_SUCCESS` verification, Airflow:
+
+- extracts staged events
+- transforms curated data
+- builds the per-window summary
+- publishes curated output to S3
+- creates the Redshift Streaming landing table
+- loads the selected window into Redshift
+- creates analytics views
+- validates Redshift analytics
+- runs Athena ↔ Redshift reconciliation
+- publishes `latest.json`
+- creates `_PROCESSED`
+
+---
+
+# 🟧 Platform Orchestration DAG
 
 DAG ID:
 
@@ -258,9 +408,9 @@ DAG ID:
 vendor_payments_data_platform_orchestration
 ```
 
-The Main Platform DAG does **not** rerun Batch or Streaming processing.
+The Platform DAG does **not** rerun Batch or Streaming processing.
 
-Its current flow is:
+It verifies their latest Airflow run states and then performs platform-level coordination.
 
 ```text
 start
@@ -280,51 +430,43 @@ end
 
 ### Pipeline Status Checks
 
-`check_batch_pipeline_status` verifies the latest run of:
+The DAG verifies the latest runs of:
 
 ```text
 vendor_payments_batch_pipeline
-```
-
-`check_streaming_pipeline_status` verifies the latest run of:
-
-```text
 vendor_payments_streaming_pipeline
 ```
 
-Both checks use Airflow metadata and require the latest upstream run state to be:
+Both must report:
 
 ```text
 success
 ```
 
-### Platform-Level Tasks
+before platform-level validation continues.
 
-`check_cloud_platform_ready`
-verifies that required Cloud Data Platform resources are available.
+### Platform-Level Responsibilities
 
-`generate_redshift_execution_summary`
-generates Redshift execution metadata.
+- Check latest Batch pipeline state
+- Check latest Streaming pipeline state
+- Check Cloud Data Platform readiness
+- Generate Redshift execution metadata
+- Validate Redshift execution metadata
+- Generate final orchestration summary
 
-`validate_redshift_execution_summary`
-validates the generated Redshift summary.
-
-`generate_orchestration_summary`
-combines Batch status, Streaming status, cloud readiness, Redshift execution metadata, and final orchestration state.
-
-Latest verified Main DAG run:
+### Latest Verified Result
 
 ```text
-Tasks: 8
 Status: success
-Latest verified start: 2026-08-31 16:43:53 UTC
+Tasks: 8
+Run duration: 00:03:12
 ```
 
 ![Platform DAG Success](assets/vendor-payments-orchestration/final-orchestration/04_platform_dag_success.png)
 
 ---
 
-## ✅ Automated Testing and Code Quality
+# ✅ Automated Testing and Code Quality
 
 Run tests inside the Airflow scheduler container:
 
@@ -340,7 +482,7 @@ docker compose exec airflow-scheduler `
   python -m ruff check dags tests scripts
 ```
 
-Current result:
+Latest result:
 
 ```text
 17 passed
@@ -351,34 +493,74 @@ All checks passed!
 
 ---
 
-## 🔎 Cross-Layer Validation
+# 🔎 Cross-Layer Validation
 
-The current architecture adds independent reconciliation between the S3 Data Lake and Redshift by querying S3 through Amazon Athena and comparing key metrics with Redshift.
+The architecture independently reconciles S3 Data Lake outputs and Redshift warehouse results by querying S3 through Amazon Athena.
 
-### Batch Validation
+This helps distinguish:
 
-The Batch DAG validates metrics such as:
+```text
+source / S3 issue
+from
+warehouse / Redshift issue
+```
+
+rather than assuming a successful COPY proves end-to-end correctness.
+
+---
+
+## Batch Grouped Cross-Layer Validation
+
+Batch validation includes both summary-level reconciliation and grouped reconciliation.
+
+Summary metrics include:
 
 ```text
 source_record_count
 row_count
 total_vouchers_paid
 total_vouchers_pending
+total_encumbrance_balance
 ```
 
-Counts are compared exactly. Monetary values use a controlled tolerance to account for CSV/Athena floating-point representation versus Redshift decimal storage.
-
-Latest result:
+Grouped validation compares:
 
 ```text
-Batch cross-layer validation: PASS
+fiscal_year
+department
+fund_category
 ```
 
-![Batch Cross-Layer Validation](assets/vendor-payments-orchestration/final-orchestration/06_batch_cross_layer_validation.png)
+for:
 
-### Streaming Validation
+```text
+group_row_count
+source_record_count
+total_vouchers_paid
+total_vouchers_pending
+total_encumbrance_balance
+```
 
-The Streaming DAG validates:
+Count metrics are compared exactly.
+
+Monetary values use a controlled tolerance to handle representation differences between Athena `DOUBLE` values and Redshift decimal values.
+
+Latest verified grouped result:
+
+```text
+Athena grouped row count: 108
+Redshift grouped row count: 108
+
+Batch grouped cross-layer validation: PASS
+```
+
+![Batch Grouped Cross-Layer Validation](assets/vendor-payments-orchestration/final-orchestration/08_batch_grouped_cross_layer_validation.png)
+
+---
+
+## Streaming Cross-Layer Validation
+
+The Streaming DAG compares:
 
 ```text
 row_count
@@ -391,19 +573,22 @@ Latest verified bounded-window result:
 ```text
 Athena row_count = 100000
 Redshift row_count = 100000
+
 Athena distinct_event_count = 100000
 Redshift distinct_event_count = 100000
 
 Streaming cross-layer validation: PASS
 ```
 
-![Streaming Cross-Layer Validation](assets/vendor-payments-orchestration/final-orchestration/07_streaming_cross_layer_validation.png)
+![Streaming Cross-Layer Validation](assets/vendor-payments-orchestration/final-orchestration/06_streaming_cross_layer_validation.png)
 
 ---
 
-## ⚙️ Continuous Integration
+# ⚙️ Continuous Integration
 
-GitHub Actions runs validation on pushes and pull requests.
+GitHub Actions validates the orchestration repository on pushes and pull requests.
+
+The CI workflow validates DAG integrity and repository tests.
 
 Latest result:
 
@@ -411,19 +596,26 @@ Latest result:
 validate-dags: Success
 ```
 
-![Airflow CI Success](assets/vendor-payments-orchestration/final-orchestration/08_airflow_ci_success.png)
+![Airflow CI Success](assets/vendor-payments-orchestration/final-orchestration/09_airflow_ci_success.png)
 
 ---
 
-## 🧾 Orchestration Summary
+# 🧾 Orchestration Summary
 
-The Main DAG writes:
+The Platform DAG generates:
 
 ```text
 output/reports/airflow_orchestration_summary.json
 ```
 
-The report records latest upstream pipeline states and platform-level validation metadata.
+The report records:
+
+- latest Batch pipeline state
+- latest Streaming pipeline state
+- Cloud Platform readiness
+- Redshift execution summary
+- Redshift validation status
+- platform orchestration status
 
 Representative structure:
 
@@ -455,45 +647,59 @@ Representative structure:
 }
 ```
 
-![Airflow Orchestration Summary](assets/vendor-payments-orchestration/final-orchestration/09_airflow_orchestration_summary.png)
-
-This summary makes the distinction between processing and coordination explicit:
+This preserves the distinction between **processing** and **coordination**:
 
 ```text
-Batch / Streaming DAGs
-→ process data
+Batch DAG
+→ processes Batch lifecycle
 
-Main Platform DAG
-→ verify upstream run states
-→ verify platform readiness
-→ validate Redshift execution state
-→ summarize orchestration state
+Streaming DAG
+→ processes bounded Streaming lifecycle
+
+Platform DAG
+→ checks upstream states
+→ validates platform readiness
+→ validates execution metadata
+→ summarizes platform state
 ```
 
 ---
 
-## 🐳 Docker Integration
+# 🐳 Docker Integration
 
-External repositories are mounted into the Airflow containers:
+External project repositories are mounted into the Airflow containers.
+
+Representative paths:
 
 ```text
 /opt/airflow/vendor_payments_batch_etl
 /opt/airflow/vendor_payments_streaming
 /opt/airflow/vendor_payments_cloud_platform
-/opt/airflow/output
 ```
 
-AWS credentials are mounted through:
+Airflow also connects to shared Docker networks required by dependent services.
+
+Streaming container-to-container communication uses:
 
 ```text
-/home/airflow/.aws
+Airflow
+→ kafka:29092
+
+Airflow
+→ redis:6379
 ```
 
-AWS integrations use IAM-based authentication through `boto3`; credentials are not hard-coded into the repository.
+while host-side Kafka access remains available through:
+
+```text
+localhost:9092
+```
+
+AWS integrations use IAM-based authentication rather than hard-coded credentials.
 
 ---
 
-## 🗂️ Project Structure
+# 🗂️ Project Structure
 
 ```text
 vendor-payments-airflow-orchestration/
@@ -511,10 +717,10 @@ vendor-payments-airflow-orchestration/
 │           ├── 03_streaming_dag_success.png
 │           ├── 04_platform_dag_success.png
 │           ├── 05_airflow_tests_and_lint.png
-│           ├── 06_batch_cross_layer_validation.png
-│           ├── 07_streaming_cross_layer_validation.png
-│           ├── 08_airflow_ci_success.png
-│           └── 09_airflow_orchestration_summary.png
+│           ├── 06_streaming_cross_layer_validation.png
+│           ├── 07_streaming_window_progression.png
+│           ├── 08_batch_grouped_cross_layer_validation.png
+│           └── 09_airflow_ci_success.png
 │
 ├── dags/
 │   ├── vendor_payments_batch_pipeline.py
@@ -527,10 +733,6 @@ vendor-payments-airflow-orchestration/
 │
 ├── scripts/
 ├── tests/
-│   ├── test_airflow_execution_metadata.py
-│   ├── test_dags.py
-│   └── test_redshift_metadata.py
-│
 ├── docker-compose.yml
 ├── Dockerfile
 ├── pytest.ini
@@ -540,9 +742,9 @@ vendor-payments-airflow-orchestration/
 
 ---
 
-## ▶️ Run Locally
+# ▶️ Run Locally
 
-Start Airflow:
+## 1. Start Airflow
 
 ```powershell
 docker compose up -d
@@ -554,52 +756,102 @@ Check services:
 docker compose ps
 ```
 
-Open the Airflow UI:
+Open:
 
 ```text
 http://localhost:8080
 ```
 
-### Run Batch
+---
+
+## 2. Start Streaming Infrastructure
+
+The Kafka / Redis / Zookeeper stack is owned by the Streaming repository.
+
+```powershell
+cd E:\dev\vendor-payments-streaming-pipeline
+docker compose up -d
+```
+
+The Airflow containers and Streaming services must share the required Docker network.
+
+---
+
+## 3. Run Batch
 
 ```powershell
 docker compose exec airflow-scheduler `
   airflow dags trigger vendor_payments_batch_pipeline
 ```
 
-### Run Streaming
+The DAG performs:
 
-The Streaming repository must first contain a completed bounded window with `_SUCCESS` and no `_PROCESSED`.
+```text
+Recovery check
+→ Silver
+→ Silver validation
+→ Gold
+→ Gold validation
+→ S3
+→ Redshift
+→ cross-layer validation
+→ grouped validation
+```
+
+---
+
+## 4. Run Streaming
+
+Prepare bounded Streaming input windows in the Streaming repository.
+
+Then trigger the Streaming DAG once:
 
 ```powershell
 docker compose exec airflow-scheduler `
   airflow dags trigger vendor_payments_streaming_pipeline
 ```
 
-### Run Main Platform Orchestration
+The DAG automatically progresses through the remaining unprocessed windows.
 
-Run after the latest Batch and Streaming pipeline runs are successful:
+```text
+001
+→ 002
+→ 003
+→ complete
+```
+
+---
+
+## 5. Run Platform Orchestration
+
+Run after the latest Batch and Streaming pipelines are successful:
 
 ```powershell
 docker compose exec airflow-scheduler `
   airflow dags trigger vendor_payments_data_platform_orchestration
 ```
 
-### Run Tests
+---
+
+## 6. Run Tests
 
 ```powershell
 docker compose exec airflow-scheduler `
   python -m pytest /opt/airflow/tests -q
 ```
 
-### Run Ruff
+---
+
+## 7. Run Ruff
 
 ```powershell
 docker compose exec airflow-scheduler `
   python -m ruff check dags tests scripts
 ```
 
-Stop Airflow:
+---
+
+## 8. Stop Airflow
 
 ```powershell
 docker compose down
@@ -607,26 +859,48 @@ docker compose down
 
 ---
 
-## 🔗 Role in the Vendor Payments Data Platform
+# 🔗 Role in the Vendor Payments Data Platform
 
 ```text
-Batch ETL Repository
+Vendor Payments Source
         ↓
-Batch Pipeline DAG
+Batch ETL
         ↓
-S3 → Redshift → Athena Validation
-                           → Main Platform DAG
-         /
-        /
-Streaming Repository
+Batch Airflow DAG
+        ↓
+S3 → Athena
+        ↓
+Redshift
+        ↓
+Cross-Layer Validation
+        ┐
+        │
+        ├──→ Platform Orchestration DAG
+        │
+Trusted Silver
+        ↓
+Bounded Streaming Windows
+        ↓
+Streaming Airflow DAG
+        ↓
+Kafka Producer
+        ↓
+Kafka
+        ↓
+Kafka Consumer + Redis
         ↓
 _SUCCESS
         ↓
-Streaming Pipeline DAG
+Curated Streaming Data
         ↓
-S3 → Redshift → Athena Validation
+S3 → Athena
+        ↓
+Redshift
+        ↓
+Cross-Layer Validation
         ↓
 latest.json + _PROCESSED
+        ┘
 ```
 
 Downstream serving:
@@ -634,36 +908,127 @@ Downstream serving:
 ```text
 latest.json
 → FastAPI
-→ React Analytics
+→ React / Power BI Analytics
 ```
 
-Airflow therefore acts as the **execution-control layer** across the platform without taking ownership away from the upstream Batch ETL or Kafka ingestion repositories.
+Airflow therefore acts as the **execution-control layer** across the platform while the individual repositories retain ownership of their domain-specific processing logic.
 
 ---
 
-## 🧠 Key Engineering Decisions
+# 🧠 Key Engineering Decisions
 
-### Why split Batch and Streaming into separate DAGs?
+## Why split Batch and Streaming into separate DAGs?
 
-Batch and Streaming do not share the same lifecycle.
+Batch and Streaming have different lifecycles.
 
-Batch operates as a full ETL run, while Streaming processes completed bounded windows. Separate DAGs make those lifecycle boundaries explicit.
+Batch operates as a complete ETL execution:
 
-### Why does the Main DAG check status instead of rerunning both pipelines?
+```text
+Raw → Silver → Gold → Cloud
+```
 
-The Main DAG is responsible for platform-level coordination, not for owning the Batch or Streaming data-processing lifecycle.
+Streaming operates as independently completed bounded windows:
 
-It checks the latest successful run state of both DAGs through Airflow metadata and only then performs platform-level reporting and validation.
+```text
+001 → 002 → 003
+```
 
-### Why does Streaming use `_SUCCESS`?
+Separate DAGs keep these lifecycle boundaries explicit.
 
-Airflow should not process a Streaming staging file merely because it exists.
+---
 
-`_SUCCESS` explicitly indicates that consumer ingestion for that bounded window is complete.
+## Why use Recovery DB in Batch?
 
-### Why use `_PROCESSED`?
+A long multi-stage pipeline needs execution state beyond simple task success.
 
-`_PROCESSED` indicates that downstream Airflow work for that window has completed.
+Recovery metadata tracks:
+
+```text
+pipeline run
+stage
+attempt
+status
+start / finish timestamps
+validation result
+```
+
+This allows Batch execution to distinguish completed, failed, and retryable stages.
+
+---
+
+## Why use candidate-first publication?
+
+Transformation success alone does not prove output correctness.
+
+Silver and Gold candidates are validated before replacing published datasets.
+
+```text
+candidate
+→ validate
+→ publish
+```
+
+This prevents a partially produced or invalid artifact from replacing the last trusted output.
+
+---
+
+## Why use validation gates?
+
+The Batch flow explicitly separates:
+
+```text
+TRANSFORM_SILVER
+→ CHECK_SILVER
+→ BUILD_GOLD
+→ CHECK_GOLD
+```
+
+A downstream stage cannot continue when its validation gate fails.
+
+---
+
+## Why automate Streaming windows through Airflow?
+
+The previous flow required individual Streaming windows to be started manually.
+
+The current DAG resolves the next unprocessed input and coordinates:
+
+```text
+discover
+→ produce
+→ consume
+→ verify
+→ process
+→ validate
+→ _PROCESSED
+→ next window
+```
+
+This makes bounded-window progression explicit and reproducible.
+
+---
+
+## Why use `_SUCCESS`?
+
+Airflow should not process staging data merely because a file exists.
+
+```text
+_SUCCESS
+```
+
+means Kafka consumer ingestion for that bounded window has completed.
+
+---
+
+## Why use `_PROCESSED`?
+
+```text
+_PROCESSED
+```
+
+means downstream Airflow processing has completed successfully.
+
+The two markers represent different lifecycle boundaries:
 
 ```text
 _SUCCESS
@@ -673,61 +1038,107 @@ _PROCESSED
 = downstream processing complete
 ```
 
-### Why publish `latest.json`?
+---
 
-The serving layer should not infer the newest completed Streaming dataset from object timestamps or directory listing order.
+## Why publish `latest.json`?
 
-`latest.json` explicitly identifies the latest fully validated and completed window.
+The serving layer should not infer the latest valid Streaming dataset from timestamps or object listing order.
 
-### Why validate Athena against Redshift?
-
-A successful Redshift load does not prove that S3 and the warehouse agree.
-
-Athena provides an independent query layer over S3 so key metrics can be reconciled between the Data Lake and Redshift.
-
-### Why keep Batch transformation logic outside Airflow?
-
-The Batch ETL repository remains the owner of raw-to-Silver-to-Gold business transformations.
-
-Airflow invokes and validates the pipeline rather than duplicating transformation logic.
-
-### Why does Airflow not consume from Kafka directly?
-
-Kafka ingestion is owned by the Streaming repository.
-
-Airflow begins only when a bounded Streaming window has completed ingestion and published `_SUCCESS`.
+`latest.json` explicitly identifies the latest fully validated Streaming window.
 
 ---
 
-## 🛣️ Planned Development
+## Why validate Athena against Redshift?
 
-The current portfolio architecture is intentionally bounded and reproducible.
+A successful Redshift COPY does not prove that S3 and warehouse outputs agree.
 
-Possible future improvements include:
-
-* Event-driven or scheduled production execution
-* Stronger failure recovery across dependent DAGs
-* Historical pipeline-state persistence
-* Centralized observability and log aggregation
-* Alerting for failed cross-layer reconciliation
-* Multi-consumer Streaming completion coordination
-* Stronger end-to-end idempotency
-
----
-
-## 🎯 Key Takeaway
-
-This project demonstrates how Airflow can evolve from one large cross-platform workflow into three explicit orchestration lifecycles:
+Athena provides an independent query layer over S3.
 
 ```text
-Batch Pipeline
-→ owns Batch processing
+S3
+→ Athena metrics
 
-Streaming Pipeline
-→ owns one completed bounded window
+Redshift
+→ warehouse metrics
 
-Main Platform Pipeline
-→ owns coordination, readiness checks, metadata validation, and reporting
+compare
+→ PASS / FAIL
 ```
 
-The result is a clearer separation between **data flow** and **control flow**, while retaining measurable validation across S3, Athena, Redshift, and downstream platform state.
+---
+
+## Why grouped Batch validation?
+
+Summary totals can match while grouped business outputs are still incorrect.
+
+The grouped validation therefore compares metrics across:
+
+```text
+fiscal_year
+department
+fund_category
+```
+
+in addition to overall totals.
+
+---
+
+## Why does Airflow invoke Kafka scripts instead of implementing Kafka logic itself?
+
+Kafka event construction, producer behavior, Redis deduplication, and consumer processing remain owned by the Streaming repository.
+
+Airflow invokes those components and coordinates their lifecycle rather than duplicating their logic.
+
+---
+
+## Why does the Platform DAG check status instead of rerunning both pipelines?
+
+The Platform DAG owns coordination, not Batch or Streaming processing.
+
+It verifies the latest upstream Airflow run states and performs platform-level readiness, metadata validation, and reporting.
+
+---
+
+# 🛣️ Planned Development
+
+Possible production-oriented improvements include:
+
+- Dead-letter queue and failed-event replay
+- Stronger crash recovery for Streaming execution
+- Persistent Streaming execution metadata
+- Consumer lag monitoring
+- Centralized observability and log aggregation
+- Schema Registry integration
+- Multi-consumer coordination
+- Event-driven DAG triggering
+- Stronger end-to-end idempotency
+- Production Kafka infrastructure
+
+---
+
+# 🎯 Key Takeaway
+
+The final Airflow architecture separates three distinct orchestration responsibilities:
+
+```text
+Batch Pipeline DAG
+→ Recovery-aware Batch processing
+→ validation gates
+→ cloud processing
+→ cross-layer validation
+
+Streaming Pipeline DAG
+→ bounded-window discovery
+→ Kafka Producer / Consumer
+→ downstream processing
+→ cloud validation
+→ automatic next-window progression
+
+Platform Orchestration DAG
+→ upstream state checks
+→ cloud readiness
+→ execution metadata validation
+→ platform reporting
+```
+
+The result is a clearer separation between **data processing**, **lifecycle control**, and **platform coordination**, while retaining measurable validation across PostgreSQL Recovery metadata, Kafka, Redis, Amazon S3, Athena, and Redshift.
