@@ -98,7 +98,7 @@ services:
     networks:
       - default
       - vendor-payments-shared
-
+      - vendor-payments-network
     ports:
       - "8080:8080"
 
@@ -128,12 +128,12 @@ services:
     networks:
       - default
       - vendor-payments-shared
-
-    command: scheduler
-
+      - vendor-payments-network
 volumes:
   postgres-db-volume:
 
 networks:
   vendor-payments-shared:
+    external: true
+  vendor-payments-network:
     external: true

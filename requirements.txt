@@ -6,3 +6,5 @@ boto3
 apache-airflow
 pytest
 ruff==0.15.17
+kafka-python
+redis

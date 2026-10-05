@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-
 from airflow import DAG
 
 from scripts.notify import task_fail_alert, notify_success
@@ -19,10 +20,20 @@ from scripts.staging.load_vendor_payments_summary import (
 )
 
 try:
-    from airflow.providers.standard.operators.python import PythonOperator
+    from airflow.providers.standard.operators.python import (
+        BranchPythonOperator,
+        PythonOperator,
+    )
 except ImportError:
-    from airflow.operators.python import PythonOperator
+    from airflow.operators.python import (
+        BranchPythonOperator,
+        PythonOperator,
+    )
 
+from airflow.operators.empty import EmptyOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+
+logger = logging.getLogger(__name__)
 
 STREAMING_PIPELINE_ROOT = Path(
     "/opt/airflow/vendor_payments_streaming"
@@ -32,6 +43,29 @@ STREAMING_STAGING_DIR = (
     STREAMING_PIPELINE_ROOT
     / "output"
     / "staging"
+)
+
+STREAMING_INPUT_DIR = (
+    STREAMING_PIPELINE_ROOT
+    / "data"
+    / "input"
+    / "stream_windows"
+)
+
+STREAMING_PIPELINE_ROOT = Path(
+    "/opt/airflow/vendor_payments_streaming"
+)
+
+STREAMING_PRODUCER_SCRIPT = (
+    STREAMING_PIPELINE_ROOT
+    / "producer"
+    / "producer.py"
+)
+
+STREAMING_CONSUMER_SCRIPT = (
+    STREAMING_PIPELINE_ROOT
+    / "consumer"
+    / "consumer.py"
 )
 
 CLOUD_PLATFORM_ROOT = Path(
@@ -111,53 +145,225 @@ default_args = {
 }
 
 
-def discover_completed_streaming_window() -> dict:
-    """Find one completed streaming window ready for downstream processing."""
-    if not STREAMING_STAGING_DIR.exists():
+def discover_next_streaming_window() -> dict:
+    """Find the next streaming input window not yet fully processed."""
+
+    if not STREAMING_INPUT_DIR.exists():
         raise FileNotFoundError(
-            "Streaming staging directory not found: "
-            f"{STREAMING_STAGING_DIR}"
+            "Streaming input directory not found: "
+            f"{STREAMING_INPUT_DIR}"
         )
 
-    completed_windows = []
+    input_files = sorted(
+        STREAMING_INPUT_DIR.glob(
+            "vendor_payments_stream_window_*.csv"
+        )
+    )
 
-    for window_dir in sorted(
-        STREAMING_STAGING_DIR.glob("stream_window_*")
-    ):
-        if not window_dir.is_dir():
+    if not input_files:
+        raise FileNotFoundError(
+            "No streaming input windows found in: "
+            f"{STREAMING_INPUT_DIR}"
+        )
+
+    for input_file in input_files:
+        window_id = input_file.stem.replace(
+            "vendor_payments_",
+            "",
+        )
+
+        window_dir = (
+            STREAMING_STAGING_DIR
+            / window_id
+        )
+
+        processed_marker = (
+            window_dir
+            / "_PROCESSED"
+        )
+
+        if processed_marker.exists():
             continue
 
-        staging_file = window_dir / "events.jsonl"
-        success_marker = window_dir / "_SUCCESS"
-        processed_marker = window_dir / "_PROCESSED"
+        return {
+            "window_id": window_id,
+            "input_file": str(input_file),
+            "processed_marker": str(processed_marker),
+            "status": "ready",
+        }
 
-        if (
-                staging_file.exists()
-                and success_marker.exists()
-                and not processed_marker.exists()
-        ):
-            completed_windows.append(window_dir)
+    raise FileNotFoundError(
+        "All streaming windows have already been processed."
+    )
 
-    if not completed_windows:
+
+def run_streaming_producer(
+    input_file: str,
+    window_id: str,
+) -> dict:
+    """Run Kafka producer for one bounded streaming window."""
+
+    source_file = Path(input_file)
+
+    if not source_file.exists():
         raise FileNotFoundError(
-            "No completed streaming window found."
+            "Streaming producer input file not found: "
+            f"{source_file}"
         )
 
-    selected_window = completed_windows[0]
-    staging_file = selected_window / "events.jsonl"
-    success_marker = selected_window / "_SUCCESS"
+    if not STREAMING_PRODUCER_SCRIPT.exists():
+        raise FileNotFoundError(
+            "Streaming producer script not found: "
+            f"{STREAMING_PRODUCER_SCRIPT}"
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(STREAMING_PRODUCER_SCRIPT),
+            str(source_file),
+        ],
+        cwd=str(STREAMING_PIPELINE_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(STREAMING_PIPELINE_ROOT),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Streaming producer failed.\n"
+            f"WINDOW ID: {window_id}\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+    return {
+        "window_id": window_id,
+        "input_file": str(source_file),
+        "status": "produced",
+    }
+
+
+def run_streaming_consumer(
+    window_id: str,
+) -> dict:
+    """Run Kafka consumer for the current streaming window."""
+
+    if not STREAMING_CONSUMER_SCRIPT.exists():
+        raise FileNotFoundError(
+            "Streaming consumer script not found: "
+            f"{STREAMING_CONSUMER_SCRIPT}"
+        )
+
+    consumer_name = (
+        f"airflow-{window_id}"
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(STREAMING_CONSUMER_SCRIPT),
+            consumer_name,
+        ],
+        cwd=str(STREAMING_PIPELINE_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(
+                STREAMING_PIPELINE_ROOT
+            ),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.stdout:
+        logger.info(
+            "Consumer stdout:\n%s",
+            result.stdout,
+        )
+
+    if result.stderr:
+        logger.warning(
+            "Consumer stderr:\n%s",
+            result.stderr,
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Streaming consumer failed.\n"
+            f"WINDOW ID: {window_id}\n"
+            f"RETURN CODE: {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
+        )
+
+    print(result.stdout)
+
+    return {
+        "window_id": window_id,
+        "status": "consumed",
+    }
+
+
+def verify_streaming_window_complete(
+    window_id: str,
+) -> dict:
+    """Verify that one streaming window is ready for downstream processing."""
+
+    window_dir = (
+        STREAMING_STAGING_DIR
+        / window_id
+    )
+
+    staging_file = (
+        window_dir
+        / "events.jsonl"
+    )
+
+    success_marker = (
+        window_dir
+        / "_SUCCESS"
+    )
+
+    if not window_dir.exists():
+        raise FileNotFoundError(
+            "Streaming window directory not found: "
+            f"{window_dir}"
+        )
+
+    if not staging_file.exists():
+        raise FileNotFoundError(
+            "Streaming staging file not found: "
+            f"{staging_file}"
+        )
 
     if staging_file.stat().st_size == 0:
         raise ValueError(
-            "Completed streaming window contains "
-            f"an empty staging file: {staging_file}"
+            "Streaming staging file is empty: "
+            f"{staging_file}"
+        )
+
+    if not success_marker.exists():
+        raise FileNotFoundError(
+            "Streaming window is not complete. "
+            f"Success marker not found: {success_marker}"
         )
 
     return {
-        "window_id": selected_window.name,
+        "window_id": window_id,
         "staging_file": str(staging_file),
         "success_marker": str(success_marker),
-        "staging_file_size_bytes": staging_file.stat().st_size,
+        "staging_file_size_bytes": (
+            staging_file.stat().st_size
+        ),
         "status": "ready",
     }
 
@@ -484,6 +690,33 @@ def mark_streaming_window_processed(
     return str(processed_marker)
 
 
+def choose_next_streaming_action() -> str:
+    """Choose whether to process another window or finish the streaming run."""
+
+    input_files = sorted(
+        STREAMING_INPUT_DIR.glob(
+            "vendor_payments_stream_window_*.csv"
+        )
+    )
+
+    for input_file in input_files:
+        window_id = input_file.stem.replace(
+            "vendor_payments_",
+            "",
+        )
+
+        processed_marker = (
+            STREAMING_STAGING_DIR
+            / window_id
+            / "_PROCESSED"
+        )
+
+        if not processed_marker.exists():
+            return "trigger_next_streaming_window"
+
+    return "streaming_pipeline_complete"
+
+
 with DAG(
     dag_id="vendor_payments_streaming_pipeline",
     default_args=default_args,
@@ -494,6 +727,7 @@ with DAG(
     start_date=datetime(2026, 4, 14),
     schedule=None,
     catchup=False,
+    max_active_runs=1,
     tags=[
         "vendor-payments",
         "streaming",
@@ -503,8 +737,49 @@ with DAG(
     on_success_callback=notify_success,
 ) as dag:
     discover_window_task = PythonOperator(
-        task_id="discover_completed_streaming_window",
-        python_callable=discover_completed_streaming_window,
+        task_id="discover_next_streaming_window",
+        python_callable=discover_next_streaming_window,
+    )
+
+    produce_window_task = PythonOperator(
+        task_id="produce_streaming_window",
+        python_callable=run_streaming_producer,
+        op_kwargs={
+            "input_file": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_next_streaming_window'"
+                ")['input_file'] }}"
+            ),
+            "window_id": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_next_streaming_window'"
+                ")['window_id'] }}"
+            ),
+        },
+    )
+
+    consume_window_task = PythonOperator(
+        task_id="consume_streaming_window",
+        python_callable=run_streaming_consumer,
+        op_kwargs={
+            "window_id": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_next_streaming_window'"
+                ")['window_id'] }}"
+            ),
+        },
+    )
+
+    verify_window_complete_task = PythonOperator(
+        task_id="verify_streaming_window_complete",
+        python_callable=verify_streaming_window_complete,
+        op_kwargs={
+            "window_id": (
+                "{{ ti.xcom_pull("
+                "task_ids='discover_next_streaming_window'"
+                ")['window_id'] }}"
+            ),
+        },
     )
 
     extract_task = PythonOperator(
@@ -513,12 +788,12 @@ with DAG(
         op_kwargs={
             "staging_file": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='verify_streaming_window_complete'"
                 ")['staging_file'] }}"
             ),
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='verify_streaming_window_complete'"
                 ")['window_id'] }}"
             ),
         },
@@ -535,7 +810,7 @@ with DAG(
             ),
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='discover_next_streaming_window'"
                 ")['window_id'] }}"
             ),
         },
@@ -552,7 +827,7 @@ with DAG(
             ),
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='discover_next_streaming_window'"
                 ")['window_id'] }}"
             ),
         },
@@ -564,12 +839,12 @@ with DAG(
         op_kwargs={
             "staging_file": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='verify_streaming_window_complete'"
                 ")['staging_file'] }}"
             ),
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='discover_next_streaming_window'"
                 ")['window_id'] }}"
             ),
         },
@@ -586,7 +861,7 @@ with DAG(
             ),
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='discover_next_streaming_window'"
                 ")['window_id'] }}"
             ),
         },
@@ -625,7 +900,7 @@ with DAG(
         op_kwargs={
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='discover_next_streaming_window'"
                 ")['window_id'] }}"
             ),
             "curated_s3_uri": (
@@ -642,7 +917,7 @@ with DAG(
         op_kwargs={
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='discover_next_streaming_window'"
                 ")['window_id'] }}"
             ),
             "curated_s3_uri": (
@@ -659,14 +934,32 @@ with DAG(
         op_kwargs={
             "window_id": (
                 "{{ ti.xcom_pull("
-                "task_ids='discover_completed_streaming_window'"
+                "task_ids='discover_next_streaming_window'"
                 ")['window_id'] }}"
             ),
         },
     )
 
+    choose_next_action_task = BranchPythonOperator(
+        task_id="choose_next_streaming_action",
+        python_callable=choose_next_streaming_action,
+    )
+
+    trigger_next_window_task = TriggerDagRunOperator(
+        task_id="trigger_next_streaming_window",
+        trigger_dag_id="vendor_payments_streaming_pipeline",
+        wait_for_completion=False,
+    )
+
+    streaming_complete_task = EmptyOperator(
+        task_id="streaming_pipeline_complete",
+    )
+
     (
             discover_window_task
+            >> produce_window_task
+            >> consume_window_task
+            >> verify_window_complete_task
             >> extract_task
             >> transform_task
             >> load_task
@@ -679,4 +972,8 @@ with DAG(
             >> streaming_cross_layer_validation_task
             >> publish_latest_streaming_pointer_task
             >> mark_processed_task
+            >> choose_next_action_task
     )
+
+    choose_next_action_task >> trigger_next_window_task
+    choose_next_action_task >> streaming_complete_task
