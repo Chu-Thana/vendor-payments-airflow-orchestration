@@ -1719,6 +1719,8 @@ def run_cross_layer_validation_with_recovery(
             report_path=None,
         )
 
+        validation_recorded = True
+
         if validation_status == "FAIL":
             raise RuntimeError(
                 "Cross-layer validation returned FAIL."
