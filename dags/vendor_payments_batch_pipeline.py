@@ -1639,6 +1639,8 @@ def run_redshift_validate_analytics_with_recovery(
             report_path=None,
         )
 
+        validation_recorded = True
+
         if validation_status == "FAIL":
             raise RuntimeError(
                 "Redshift analytics validation returned FAIL."
